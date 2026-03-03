@@ -4,6 +4,7 @@ pub const dispatcher = @import("dispatcher.zig");
 pub const ecs = @import("ecs.zig");
 pub const component = @import("component.zig");
 pub const context = @import("context.zig");
+pub const position = @import("position.zig");
 
 // Re-exports — public API
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -20,6 +21,9 @@ pub const ComponentPayload = component.ComponentPayload;
 pub const PluginContext = context.PluginContext;
 pub const TestContext = context.TestContext;
 pub const RecordingHooks = context.RecordingHooks;
+
+// Core components
+pub const Position = position.Position;
 
 /// Standard engine lifecycle events — parameterized by Entity type.
 pub fn EngineHookPayload(comptime Entity: type) type {
@@ -155,20 +159,20 @@ test "DefaultEcs: create entity, add/get/has/remove component" {
     const entity = e.createEntity();
     try testing.expect(e.entityExists(entity));
 
-    const Position = struct { x: f32, y: f32 };
+    const TestPos = struct { x: f32, y: f32 };
 
-    e.add(entity, Position{ .x = 10, .y = 20 });
-    try testing.expect(e.has(entity, Position));
+    e.add(entity, TestPos{ .x = 10, .y = 20 });
+    try testing.expect(e.has(entity, TestPos));
 
-    const pos = e.get(entity, Position).?;
+    const pos = e.get(entity, TestPos).?;
     try testing.expectEqual(10.0, pos.x);
     try testing.expectEqual(20.0, pos.y);
 
     pos.x = 99;
-    try testing.expectEqual(99.0, e.get(entity, Position).?.x);
+    try testing.expectEqual(99.0, e.get(entity, TestPos).?.x);
 
-    e.remove(entity, Position);
-    try testing.expect(!e.has(entity, Position));
+    e.remove(entity, TestPos);
+    try testing.expect(!e.has(entity, TestPos));
 
     e.destroyEntity(entity);
     try testing.expect(!e.entityExists(entity));
@@ -180,19 +184,19 @@ test "DefaultEcs: multiple component types on same entity" {
 
     const e = DefaultEcs{ .backend = &backend };
 
-    const Position = struct { x: f32, y: f32 };
+    const TestPos = struct { x: f32, y: f32 };
     const Health = struct { current: u32, max: u32 };
 
     const entity = e.createEntity();
-    e.add(entity, Position{ .x = 1, .y = 2 });
+    e.add(entity, TestPos{ .x = 1, .y = 2 });
     e.add(entity, Health{ .current = 100, .max = 100 });
 
-    try testing.expect(e.has(entity, Position));
+    try testing.expect(e.has(entity, TestPos));
     try testing.expect(e.has(entity, Health));
     try testing.expectEqual(100, e.get(entity, Health).?.current);
 
-    e.remove(entity, Position);
-    try testing.expect(!e.has(entity, Position));
+    e.remove(entity, TestPos);
+    try testing.expect(!e.has(entity, TestPos));
     try testing.expect(e.has(entity, Health));
 }
 
@@ -205,11 +209,11 @@ test "MockEcsBackend: works through trait" {
     const e = ctx.ecs();
     const entity = e.createEntity();
 
-    const Position = struct { x: f32, y: f32 };
-    e.add(entity, Position{ .x = 5, .y = 10 });
+    const TestPos = struct { x: f32, y: f32 };
+    e.add(entity, TestPos{ .x = 5, .y = 10 });
 
-    try testing.expect(e.has(entity, Position));
-    try testing.expectEqual(5.0, e.get(entity, Position).?.x);
+    try testing.expect(e.has(entity, TestPos));
+    try testing.expectEqual(5.0, e.get(entity, TestPos).?.x);
 }
 
 // -- PluginContext tests --
@@ -243,6 +247,22 @@ test "RecordingHooks: records and asserts event sequence" {
     try recorder.expectNext(.pong);
     try recorder.expectNext(.ping);
     try recorder.expectEmpty();
+}
+
+// -- Position tests --
+
+test "Position: defaults to origin with zero rotation" {
+    const pos = Position{};
+    try testing.expectEqual(@as(f32, 0), pos.x);
+    try testing.expectEqual(@as(f32, 0), pos.y);
+    try testing.expectEqual(@as(f32, 0), pos.rotation);
+}
+
+test "Position: can be initialized with values" {
+    const pos = Position{ .x = 100, .y = 200, .rotation = 1.57 };
+    try testing.expectEqual(@as(f32, 100), pos.x);
+    try testing.expectEqual(@as(f32, 200), pos.y);
+    try testing.expectApproxEqAbs(@as(f32, 1.57), pos.rotation, 0.01);
 }
 
 // -- Integration: zig-ecs + hooks --

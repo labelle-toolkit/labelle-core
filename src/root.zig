@@ -1,320 +1,88 @@
-const std = @import("std");
-
+pub const coordinates = @import("coordinates.zig");
 pub const dispatcher = @import("dispatcher.zig");
 pub const ecs = @import("ecs.zig");
-pub const component = @import("component.zig");
-pub const context = @import("context.zig");
 pub const position = @import("position.zig");
+pub const audio = @import("audio.zig");
+pub const input = @import("input.zig");
+pub const gui = @import("gui.zig");
+pub const gizmos = @import("gizmos.zig");
+pub const physics = @import("physics.zig");
+pub const render = @import("render.zig");
+pub const hierarchy = @import("hierarchy.zig");
+pub const sweep_and_prune = @import("sweep_and_prune.zig");
+pub const quad_tree = @import("quad_tree.zig");
 
-// Re-exports — public API
+// Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
 pub const MergeHooks = dispatcher.MergeHooks;
 pub const UnwrapReceiver = dispatcher.UnwrapReceiver;
 
 pub const Ecs = ecs.Ecs;
-pub const ZigEcsBackend = ecs.ZigEcsBackend;
-pub const DefaultEcs = ecs.DefaultEcs;
 pub const MockEcsBackend = ecs.MockEcsBackend;
+pub const GenericQueryIterator = ecs.GenericQueryIterator;
+pub const QueryResult = ecs.QueryResult;
+pub const validateComponentTuple = ecs.validateComponentTuple;
 
-pub const ComponentPayload = component.ComponentPayload;
+pub const AudioInterface = audio.AudioInterface;
+pub const StubAudio = audio.StubAudio;
 
-pub const PluginContext = context.PluginContext;
-pub const TestContext = context.TestContext;
-pub const RecordingHooks = context.RecordingHooks;
+pub const InputInterface = input.InputInterface;
+pub const StubInput = input.StubInput;
 
-// Core components
+pub const GuiInterface = gui.GuiInterface;
+pub const StubGui = gui.StubGui;
+
+pub const GizmoComponent = gizmos.GizmoComponent;
+pub const GizmoDraw = gizmos.GizmoDraw;
+pub const GizmoInterface = gizmos.GizmoInterface;
+pub const GizmoVisibility = gizmos.GizmoVisibility;
+pub const StubGizmos = gizmos.StubGizmos;
+
+pub const PhysicsInterface = physics.PhysicsInterface;
+pub const StubPhysics = physics.StubPhysics;
+
+pub const RenderInterface = render.RenderInterface;
+pub const StubRender = render.StubRender;
+pub const VisualType = render.VisualType;
+
+pub const ParentComponent = hierarchy.ParentComponent;
+pub const ChildrenComponent = hierarchy.ChildrenComponent;
+
 pub const Position = position.Position;
+pub const PositionI = position.PositionI;
+
+pub const CoordinateSystem = coordinates.CoordinateSystem;
+pub const GamePosition = coordinates.GamePosition;
+pub const ScreenPosition = coordinates.ScreenPosition;
+pub const gameToScreen = coordinates.gameToScreen;
+pub const screenToGame = coordinates.screenToGame;
+
+pub const SweepAndPrune = sweep_and_prune.SweepAndPrune;
+pub const AABB = sweep_and_prune.AABB;
+pub const CollisionPair = sweep_and_prune.CollisionPair;
+
+pub const QuadTree = quad_tree.QuadTree;
+pub const QuadTreeConfig = quad_tree.QuadTreeConfig;
+pub const Rectangle = quad_tree.Rectangle;
+pub const EntityPoint = quad_tree.EntityPoint;
 
 /// Standard engine lifecycle events — parameterized by Entity type.
 pub fn EngineHookPayload(comptime Entity: type) type {
     return union(enum) {
-        game_init: GameInitInfo,
-        game_deinit: void,
-        frame_start: FrameInfo,
-        frame_end: FrameInfo,
-        scene_load: SceneInfo,
-        scene_unload: SceneInfo,
         entity_created: EntityInfo(Entity),
         entity_destroyed: EntityInfo(Entity),
+        frame_start: FrameInfo,
+        frame_end: FrameInfo,
     };
 }
 
-pub const GameInitInfo = struct {
-    allocator: std.mem.Allocator,
-};
-
 pub const FrameInfo = struct {
-    frame_number: u64,
     dt: f32,
-};
-
-pub const SceneInfo = struct {
-    name: []const u8,
 };
 
 pub fn EntityInfo(comptime Entity: type) type {
     return struct {
         entity_id: Entity,
-        prefab_name: ?[]const u8 = null,
     };
 }
 
-// ============================================================
-// Tests
-// ============================================================
-
-const testing = std.testing;
-
-// -- Dispatcher tests --
-
-const SimplePayload = union(enum) {
-    ping: u32,
-    pong: []const u8,
-};
-
-test "dispatcher: basic emit calls receiver method" {
-    const Receiver = struct {
-        ping_value: u32 = 0,
-
-        pub fn ping(self: *@This(), value: u32) void {
-            self.ping_value = value;
-        }
-    };
-
-    var recv = Receiver{};
-    const D = HookDispatcher(SimplePayload, *Receiver, .{});
-    const d = D{ .receiver = &recv };
-
-    d.emit(.{ .ping = 42 });
-    try testing.expectEqual(42, recv.ping_value);
-
-    d.emit(.{ .pong = "hello" });
-    try testing.expectEqual(42, recv.ping_value);
-}
-
-test "dispatcher: partial handling compiles" {
-    const Receiver = struct {
-        pub fn ping(_: @This(), _: u32) void {}
-    };
-
-    const D = HookDispatcher(SimplePayload, Receiver, .{});
-    const d = D{ .receiver = .{} };
-    d.emit(.{ .ping = 1 });
-    d.emit(.{ .pong = "test" });
-}
-
-test "MergeHooks: calls receivers in tuple order" {
-    var order: [3]u8 = .{ 0, 0, 0 };
-    var idx: u8 = 0;
-    const idx_ptr = &idx;
-    const order_ptr = &order;
-
-    const ReceiverA = struct {
-        order: *[3]u8,
-        idx: *u8,
-
-        pub fn ping(self: @This(), _: u32) void {
-            self.order[self.idx.*] = 'A';
-            self.idx.* += 1;
-        }
-    };
-
-    const ReceiverB = struct {
-        order: *[3]u8,
-        idx: *u8,
-
-        pub fn ping(self: @This(), _: u32) void {
-            self.order[self.idx.*] = 'B';
-            self.idx.* += 1;
-        }
-
-        pub fn pong(self: @This(), _: []const u8) void {
-            self.order[self.idx.*] = 'b';
-            self.idx.* += 1;
-        }
-    };
-
-    const Merged = MergeHooks(SimplePayload, .{ ReceiverA, ReceiverB });
-    const merged = Merged{ .receivers = .{
-        ReceiverA{ .order = order_ptr, .idx = idx_ptr },
-        ReceiverB{ .order = order_ptr, .idx = idx_ptr },
-    } };
-
-    merged.emit(.{ .ping = 1 });
-    try testing.expectEqual('A', order[0]);
-    try testing.expectEqual('B', order[1]);
-
-    merged.emit(.{ .pong = "x" });
-    try testing.expectEqual('b', order[2]);
-}
-
-// -- ECS tests (zig-ecs backend) --
-
-test "DefaultEcs: create entity, add/get/has/remove component" {
-    var backend = ZigEcsBackend.init(testing.allocator);
-    defer backend.deinit();
-
-    const e = DefaultEcs{ .backend = &backend };
-
-    const entity = e.createEntity();
-    try testing.expect(e.entityExists(entity));
-
-    const TestPos = struct { x: f32, y: f32 };
-
-    e.add(entity, TestPos{ .x = 10, .y = 20 });
-    try testing.expect(e.has(entity, TestPos));
-
-    const pos = e.get(entity, TestPos).?;
-    try testing.expectEqual(10.0, pos.x);
-    try testing.expectEqual(20.0, pos.y);
-
-    pos.x = 99;
-    try testing.expectEqual(99.0, e.get(entity, TestPos).?.x);
-
-    e.remove(entity, TestPos);
-    try testing.expect(!e.has(entity, TestPos));
-
-    e.destroyEntity(entity);
-    try testing.expect(!e.entityExists(entity));
-}
-
-test "DefaultEcs: multiple component types on same entity" {
-    var backend = ZigEcsBackend.init(testing.allocator);
-    defer backend.deinit();
-
-    const e = DefaultEcs{ .backend = &backend };
-
-    const TestPos = struct { x: f32, y: f32 };
-    const Health = struct { current: u32, max: u32 };
-
-    const entity = e.createEntity();
-    e.add(entity, TestPos{ .x = 1, .y = 2 });
-    e.add(entity, Health{ .current = 100, .max = 100 });
-
-    try testing.expect(e.has(entity, TestPos));
-    try testing.expect(e.has(entity, Health));
-    try testing.expectEqual(100, e.get(entity, Health).?.current);
-
-    e.remove(entity, TestPos);
-    try testing.expect(!e.has(entity, TestPos));
-    try testing.expect(e.has(entity, Health));
-}
-
-// -- MockEcsBackend tests --
-
-test "MockEcsBackend: works through trait" {
-    var ctx = TestContext(u32).init(testing.allocator);
-    defer ctx.deinit();
-
-    const e = ctx.ecs();
-    const entity = e.createEntity();
-
-    const TestPos = struct { x: f32, y: f32 };
-    e.add(entity, TestPos{ .x = 5, .y = 10 });
-
-    try testing.expect(e.has(entity, TestPos));
-    try testing.expectEqual(5.0, e.get(entity, TestPos).?.x);
-}
-
-// -- PluginContext tests --
-
-test "PluginContext: validates and exposes correct types" {
-    const Ctx = PluginContext(.{ .EcsType = DefaultEcs });
-
-    var backend = ZigEcsBackend.init(testing.allocator);
-    defer backend.deinit();
-    const e: Ctx.EcsType = .{ .backend = &backend };
-
-    const entity: Ctx.Entity = e.createEntity();
-    try testing.expect(e.entityExists(entity));
-}
-
-// -- RecordingHooks tests --
-
-test "RecordingHooks: records and asserts event sequence" {
-    var recorder = RecordingHooks(SimplePayload).init(testing.allocator);
-    defer recorder.deinit();
-
-    recorder.emit(.{ .ping = 42 });
-    recorder.emit(.{ .pong = "hello" });
-    recorder.emit(.{ .ping = 99 });
-
-    try testing.expectEqual(3, recorder.len());
-    try testing.expectEqual(2, recorder.count(.ping));
-    try testing.expectEqual(1, recorder.count(.pong));
-
-    try recorder.expectNext(.ping);
-    try recorder.expectNext(.pong);
-    try recorder.expectNext(.ping);
-    try recorder.expectEmpty();
-}
-
-// -- Position tests --
-
-test "Position: defaults to origin with zero rotation" {
-    const pos = Position{};
-    try testing.expectEqual(@as(f32, 0), pos.x);
-    try testing.expectEqual(@as(f32, 0), pos.y);
-    try testing.expectEqual(@as(f32, 0), pos.rotation);
-}
-
-test "Position: can be initialized with values" {
-    const pos = Position{ .x = 100, .y = 200, .rotation = 1.57 };
-    try testing.expectEqual(@as(f32, 100), pos.x);
-    try testing.expectEqual(@as(f32, 200), pos.y);
-    try testing.expectApproxEqAbs(@as(f32, 1.57), pos.rotation, 0.01);
-}
-
-// -- Integration: zig-ecs + hooks --
-
-test "integration: plugin pattern with DefaultEcs and hooks" {
-    // Simulate a plugin that uses core's DefaultEcs and hooks
-    const InPayload = union(enum) {
-        add_item: struct { entity_id: ecs.ZigEcsBackend.Entity, name: []const u8 },
-    };
-
-    const OutPayload = union(enum) {
-        item_added: struct { entity_id: ecs.ZigEcsBackend.Entity, name: []const u8 },
-    };
-
-    var backend = ZigEcsBackend.init(testing.allocator);
-    defer backend.deinit();
-
-    const e = DefaultEcs{ .backend = &backend };
-    const entity = e.createEntity();
-
-    // Game receiver
-    const GameRecv = struct {
-        last_name: ?[]const u8 = null,
-
-        pub fn item_added(self: *@This(), p: anytype) void {
-            self.last_name = p.name;
-        }
-    };
-
-    var game_recv = GameRecv{};
-
-    const OutDispatcher = HookDispatcher(OutPayload, *GameRecv, .{});
-
-    // Bound receiver
-    const BoundRecv = struct {
-        out: OutDispatcher,
-
-        pub fn add_item(self: @This(), p: anytype) void {
-            self.out.emit(.{ .item_added = .{
-                .entity_id = p.entity_id,
-                .name = p.name,
-            } });
-        }
-    };
-
-    const InDispatcher = HookDispatcher(InPayload, BoundRecv, .{});
-    const in_hooks = InDispatcher{
-        .receiver = .{
-            .out = .{ .receiver = &game_recv },
-        },
-    };
-
-    in_hooks.emit(.{ .add_item = .{ .entity_id = entity, .name = "sword" } });
-    try testing.expectEqualStrings("sword", game_recv.last_name.?);
-}

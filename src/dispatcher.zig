@@ -1,7 +1,5 @@
 const std = @import("std");
 
-/// Unwrap pointer types to get the underlying struct for comptime inspection.
-/// *T -> T, **T -> T, T -> T
 pub fn UnwrapReceiver(comptime T: type) type {
     var Current = T;
     while (@typeInfo(Current) == .pointer) {
@@ -10,11 +8,6 @@ pub fn UnwrapReceiver(comptime T: type) type {
     return Current;
 }
 
-/// Core hook dispatcher — receiver-based, comptime-validated.
-///
-/// PayloadUnion: tagged union of event payloads (field names = event names)
-/// Receiver: struct (or pointer to struct) with handler methods matching union field names
-/// Options: .exhaustive = true to require handlers for all events
 pub fn HookDispatcher(
     comptime PayloadUnion: type,
     comptime Receiver: type,
@@ -74,7 +67,6 @@ pub fn HookDispatcher(
     };
 }
 
-/// Compose N receiver types into one merged receiver.
 pub fn MergeHooks(
     comptime PayloadUnion: type,
     comptime ReceiverTypes: anytype,

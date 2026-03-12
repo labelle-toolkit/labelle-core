@@ -157,21 +157,29 @@ pub fn QuadTree(comptime T: type, comptime config: QuadTreeConfig) type {
                 if (pos.y > self.highest_y) self.highest_y = pos.y;
             }
 
-            try self.nodes.append(self.allocator, .{ .boundary = .{
-                .x = self.lowest_x - config.gutter,
-                .y = self.lowest_y - config.gutter,
-                .width = (self.highest_x - self.lowest_x) + config.gutter * 2,
-                .height = (self.highest_y - self.lowest_y) + config.gutter * 2,
-            } });
+            const boundary = if (positions.len == 0)
+                self.original_boundary
+            else
+                Rectangle{
+                    .x = self.lowest_x - config.gutter,
+                    .y = self.lowest_y - config.gutter,
+                    .width = (self.highest_x - self.lowest_x) + config.gutter * 2,
+                    .height = (self.highest_y - self.lowest_y) + config.gutter * 2,
+                };
+
+            try self.nodes.append(self.allocator, .{ .boundary = boundary });
         }
 
         pub fn reset(self: *Self) !void {
-            const boundary = Rectangle{
-                .x = self.lowest_x - config.gutter,
-                .y = self.lowest_y - config.gutter,
-                .width = (self.highest_x - self.lowest_x) + config.gutter * 2,
-                .height = (self.highest_y - self.lowest_y) + config.gutter * 2,
-            };
+            const boundary = if (self.lowest_x == std.math.inf(f32) or self.highest_x == -std.math.inf(f32))
+                self.original_boundary
+            else
+                Rectangle{
+                    .x = self.lowest_x - config.gutter,
+                    .y = self.lowest_y - config.gutter,
+                    .width = (self.highest_x - self.lowest_x) + config.gutter * 2,
+                    .height = (self.highest_y - self.lowest_y) + config.gutter * 2,
+                };
             self.nodes.clearRetainingCapacity();
             self.lowest_x = std.math.inf(f32);
             self.lowest_y = std.math.inf(f32);

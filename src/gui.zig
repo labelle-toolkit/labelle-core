@@ -72,7 +72,7 @@ pub fn GuiInterface(comptime Impl: type) type {
 
         pub inline fn checkboxWidget(id: u32, text: [:0]const u8, x: i32, y: i32, checked: bool) bool {
             if (@hasDecl(Impl, "checkbox")) return Impl.checkbox(id, text, x, y, checked);
-            return false;
+            return checked;
         }
     };
 }

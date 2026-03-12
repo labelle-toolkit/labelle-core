@@ -397,7 +397,7 @@ test "MockEcsBackend: single component query with data access" {
     _ = e3;
 
     var q = e.query(.{Pos});
-    defer q.deinit(testing.allocator);
+    defer q.deinit();
 
     var count: usize = 0;
     var sum_x: f32 = 0;
@@ -433,7 +433,7 @@ test "MockEcsBackend: multi-component query" {
     e.add(e3, Health{ .current = 50, .max = 50 });
 
     var q = e.query(.{ Pos, Health });
-    defer q.deinit(testing.allocator);
+    defer q.deinit();
 
     var count: usize = 0;
     while (q.next()) |row| {
@@ -513,7 +513,7 @@ test "Query: single component with data access" {
     e.add(e2, Pos{ .x = 30, .y = 40 });
 
     var q = e.query(.{Pos});
-    defer q.deinit(testing.allocator);
+    defer q.deinit();
 
     var count: usize = 0;
     var sum_x: f32 = 0;
@@ -550,7 +550,7 @@ test "Query: multiple components with data access" {
     e.add(e3, Vel{ .dx = 50, .dy = 60 });
 
     var q = e.query(.{ Pos, Vel });
-    defer q.deinit(testing.allocator);
+    defer q.deinit();
 
     var count: usize = 0;
     var sum_dx: f32 = 0;
@@ -579,7 +579,7 @@ test "Query: mutable pointers allow component modification" {
 
     // Use query to modify position based on velocity
     var q = e.query(.{ Pos, Vel });
-    defer q.deinit(testing.allocator);
+    defer q.deinit();
 
     while (q.next()) |row| {
         row.comp_0.x += row.comp_1.dx;

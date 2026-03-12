@@ -128,6 +128,7 @@ pub fn GenericQueryIterator(comptime BackendPtr: type, comptime EntityType: type
         backend: BackendPtr,
         entities: std.ArrayListUnmanaged(EntityType),
         index: usize,
+        allocator: std.mem.Allocator,
 
         const QI = @This();
         pub const Result = QueryResult(EntityType, components);
@@ -158,8 +159,8 @@ pub fn GenericQueryIterator(comptime BackendPtr: type, comptime EntityType: type
             return null;
         }
 
-        pub fn deinit(self: *QI, allocator: std.mem.Allocator) void {
-            self.entities.deinit(allocator);
+        pub fn deinit(self: *QI) void {
+            self.entities.deinit(self.allocator);
         }
     };
 }
@@ -316,6 +317,7 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
                 .backend = self,
                 .entities = entities,
                 .index = 0,
+                .allocator = self.allocator,
             };
         }
 

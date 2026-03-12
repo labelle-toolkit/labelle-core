@@ -15,8 +15,6 @@ const GuiInterface = root.GuiInterface;
 const StubGui = root.StubGui;
 const GizmoInterface = root.GizmoInterface;
 const StubGizmos = root.StubGizmos;
-const PhysicsInterface = root.PhysicsInterface;
-const StubPhysics = root.StubPhysics;
 const RenderInterface = root.RenderInterface;
 const StubRender = root.StubRender;
 const ParentComponent = root.ParentComponent;
@@ -311,38 +309,6 @@ test "GizmoInterface(StubGizmos) draws and counts" {
     try testing.expectEqual(1, StubGizmos.getRectCount());
     try testing.expectEqual(1, StubGizmos.getCircleCount());
     try testing.expectEqual(1, StubGizmos.getTextCount());
-}
-
-test "PhysicsInterface(StubPhysics) create, move, step" {
-    const Physics = PhysicsInterface(StubPhysics);
-    StubPhysics.reset();
-
-    const b1 = Physics.createBody(.{ .x = 10, .y = 20 });
-    const b2 = Physics.createBody(.{ .body_type = .static, .x = 100, .y = 0 });
-    try testing.expectEqual(2, Physics.bodyCount());
-
-    // Position set at creation
-    const pos = Physics.getPosition(b1);
-    try testing.expectEqual(10.0, pos.x);
-    try testing.expectEqual(20.0, pos.y);
-
-    // Velocity + step = integration
-    Physics.setVelocity(b1, .{ .x = 100, .y = 0 });
-    Physics.step(0.5);
-    const after = Physics.getPosition(b1);
-    try testing.expectEqual(60.0, after.x); // 10 + 100*0.5
-    try testing.expectEqual(20.0, after.y);
-
-    // Static body unchanged
-    try testing.expectEqual(100.0, Physics.getPosition(b2).x);
-
-    // Destroy
-    Physics.destroyBody(b1);
-    try testing.expectEqual(1, Physics.bodyCount());
-
-    // Queries return null with stub
-    try testing.expect(Physics.overlapPoint(.{ .x = 0, .y = 0 }) == null);
-    try testing.expect(Physics.raycast(.{ .x = 0, .y = 0 }, .{ .x = 10, .y = 0 }) == null);
 }
 
 test "RenderInterface(StubRender) validates" {

@@ -6,11 +6,8 @@ pub const audio = @import("audio.zig");
 pub const input = @import("input.zig");
 pub const gui = @import("gui.zig");
 pub const gizmos = @import("gizmos.zig");
-pub const physics = @import("physics.zig");
 pub const render = @import("render.zig");
 pub const hierarchy = @import("hierarchy.zig");
-pub const sweep_and_prune = @import("sweep_and_prune.zig");
-pub const quad_tree = @import("quad_tree.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -38,9 +35,6 @@ pub const GizmoInterface = gizmos.GizmoInterface;
 pub const GizmoVisibility = gizmos.GizmoVisibility;
 pub const StubGizmos = gizmos.StubGizmos;
 
-pub const PhysicsInterface = physics.PhysicsInterface;
-pub const StubPhysics = physics.StubPhysics;
-
 pub const RenderInterface = render.RenderInterface;
 pub const StubRender = render.StubRender;
 pub const VisualType = render.VisualType;
@@ -56,15 +50,6 @@ pub const GamePosition = coordinates.GamePosition;
 pub const ScreenPosition = coordinates.ScreenPosition;
 pub const gameToScreen = coordinates.gameToScreen;
 pub const screenToGame = coordinates.screenToGame;
-
-pub const SweepAndPrune = sweep_and_prune.SweepAndPrune;
-pub const AABB = sweep_and_prune.AABB;
-pub const CollisionPair = sweep_and_prune.CollisionPair;
-
-pub const QuadTree = quad_tree.QuadTree;
-pub const QuadTreeConfig = quad_tree.QuadTreeConfig;
-pub const Rectangle = quad_tree.Rectangle;
-pub const EntityPoint = quad_tree.EntityPoint;
 
 /// Standard engine lifecycle events — parameterized by Entity type.
 pub fn EngineHookPayload(comptime Entity: type) type {

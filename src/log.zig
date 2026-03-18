@@ -11,8 +11,8 @@ pub const LogLevel = enum(u3) {
     pub fn label(self: LogLevel) []const u8 {
         return switch (self) {
             .debug => "DEBUG",
-            .info => "INFO ",
-            .warn => "WARN ",
+            .info => "INFO",
+            .warn => "WARN",
             .err => "ERROR",
         };
     }
@@ -29,7 +29,7 @@ pub fn LogSinkInterface(comptime Impl: type) type {
         pub inline fn write(
             level: LogLevel,
             comptime scope: []const u8,
-            elapsed_s: f32,
+            elapsed_s: f64,
             comptime fmt: []const u8,
             args: anytype,
         ) void {
@@ -66,6 +66,6 @@ pub const StderrLogSink = struct {
         args: anytype,
     ) void {
         const prefix = if (scope.len > 0) scope ++ ": " else "";
-        std.debug.print("[{d:.3}s] {s} " ++ prefix ++ fmt ++ "\n", .{elapsed_s, level.label()} ++ args);
+        std.debug.print("[{d:.3}s] {s:<5} " ++ prefix ++ fmt ++ "\n", .{elapsed_s, level.label()} ++ args);
     }
 };

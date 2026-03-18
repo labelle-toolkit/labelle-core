@@ -8,6 +8,7 @@ pub const gui = @import("gui.zig");
 pub const gizmos = @import("gizmos.zig");
 pub const render = @import("render.zig");
 pub const hierarchy = @import("hierarchy.zig");
+pub const log = @import("log.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -38,6 +39,11 @@ pub const StubGizmos = gizmos.StubGizmos;
 pub const RenderInterface = render.RenderInterface;
 pub const StubRender = render.StubRender;
 pub const VisualType = render.VisualType;
+
+pub const LogLevel = log.LogLevel;
+pub const LogSinkInterface = log.LogSinkInterface;
+pub const StubLogSink = log.StubLogSink;
+pub const StderrLogSink = log.StderrLogSink;
 
 pub const ParentComponent = hierarchy.ParentComponent;
 pub const ChildrenComponent = hierarchy.ChildrenComponent;

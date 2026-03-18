@@ -2,6 +2,8 @@
 /// The assembler provides the concrete Impl (StderrLogSink, StubLogSink, etc.).
 /// Engine and plugins use this for zero-cost dispatch.
 
+const builtin = @import("builtin");
+
 pub const LogLevel = enum(u2) {
     debug = 0,
     info = 1,
@@ -16,6 +18,14 @@ pub const LogLevel = enum(u2) {
             .err => "ERROR",
         };
     }
+};
+
+/// Default minimum log level based on optimize mode.
+/// Debug: all levels. Release: warn + err only.
+pub const default_min_level: LogLevel = switch (builtin.mode) {
+    .Debug => .debug,
+    .ReleaseSafe => .info,
+    .ReleaseFast, .ReleaseSmall => .warn,
 };
 
 pub fn LogSinkInterface(comptime Impl: type) type {

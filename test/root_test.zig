@@ -569,5 +569,7 @@ test "LogSinkInterface(StubLogSink) compiles" {
 }
 
 test "LogSinkInterface(StderrLogSink) compiles" {
-    _ = LogSinkInterface(StderrLogSink);
+    const Log = LogSinkInterface(StderrLogSink);
+    Log.write(.warn, "test", 1.23, "value {d}", .{123});
+    Log.flush();
 }

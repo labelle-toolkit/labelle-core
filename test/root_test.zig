@@ -13,6 +13,9 @@ const InputInterface = root.InputInterface;
 const StubInput = root.StubInput;
 const GuiInterface = root.GuiInterface;
 const StubGui = root.StubGui;
+const LogSinkInterface = root.LogSinkInterface;
+const StubLogSink = root.StubLogSink;
+const StderrLogSink = root.StderrLogSink;
 const GizmoInterface = root.GizmoInterface;
 const StubGizmos = root.StubGizmos;
 const RenderInterface = root.RenderInterface;
@@ -556,4 +559,15 @@ test "Query: mutable pointers allow component modification" {
     const pos = e.get(entity, Pos).?;
     try testing.expectEqual(5.0, pos.x);
     try testing.expectEqual(10.0, pos.y);
+}
+
+test "LogSinkInterface(StubLogSink) compiles" {
+    const Log = LogSinkInterface(StubLogSink);
+    Log.write(.info, "", 0.0, "test {s}", .{"msg"});
+    Log.write(.debug, "scope", 1.5, "val={d}", .{42});
+    Log.flush();
+}
+
+test "LogSinkInterface(StderrLogSink) compiles" {
+    _ = LogSinkInterface(StderrLogSink);
 }

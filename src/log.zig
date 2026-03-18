@@ -1,8 +1,8 @@
 /// Comptime-validated log sink interface.
-/// The assembler provides the concrete Impl (StderrSink, EmscriptenSink, etc.).
+/// The assembler provides the concrete Impl (StderrLogSink, StubLogSink, etc.).
 /// Engine and plugins use this for zero-cost dispatch.
 
-pub const LogLevel = enum(u3) {
+pub const LogLevel = enum(u2) {
     debug = 0,
     info = 1,
     warn = 2,
@@ -47,7 +47,7 @@ pub const StubLogSink = struct {
     pub fn write(
         _: LogLevel,
         comptime _: []const u8,
-        _: f32,
+        _: f64,
         comptime _: []const u8,
         _: anytype,
     ) void {}
@@ -61,11 +61,11 @@ pub const StderrLogSink = struct {
     pub fn write(
         level: LogLevel,
         comptime scope: []const u8,
-        elapsed_s: f32,
+        elapsed_s: f64,
         comptime fmt: []const u8,
         args: anytype,
     ) void {
-        const prefix = if (scope.len > 0) scope ++ ": " else "";
+        const prefix = comptime if (scope.len > 0) scope ++ ": " else "";
         std.debug.print("[{d:.3}s] {s:<5} " ++ prefix ++ fmt ++ "\n", .{elapsed_s, level.label()} ++ args);
     }
 };

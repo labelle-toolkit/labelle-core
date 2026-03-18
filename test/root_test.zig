@@ -13,6 +13,9 @@ const InputInterface = root.InputInterface;
 const StubInput = root.StubInput;
 const GuiInterface = root.GuiInterface;
 const StubGui = root.StubGui;
+const LogSinkInterface = root.LogSinkInterface;
+const StubLogSink = root.StubLogSink;
+const StderrLogSink = root.StderrLogSink;
 const GizmoInterface = root.GizmoInterface;
 const StubGizmos = root.StubGizmos;
 const RenderInterface = root.RenderInterface;
@@ -556,4 +559,81 @@ test "Query: mutable pointers allow component modification" {
     const pos = e.get(entity, Pos).?;
     try testing.expectEqual(5.0, pos.x);
     try testing.expectEqual(10.0, pos.y);
+}
+
+const CapturingLogSink = struct {
+    const LogLevel = root.LogLevel;
+
+    var last_level: ?LogLevel = null;
+    var last_scope: []const u8 = "";
+    var last_elapsed: f64 = 0;
+    var call_count: usize = 0;
+
+    pub fn write(
+        level: LogLevel,
+        comptime scope: []const u8,
+        elapsed_s: f64,
+        comptime _: []const u8,
+        _: anytype,
+    ) void {
+        last_level = level;
+        last_scope = scope;
+        last_elapsed = elapsed_s;
+        call_count += 1;
+    }
+
+    fn reset() void {
+        last_level = null;
+        last_scope = "";
+        last_elapsed = 0;
+        call_count = 0;
+    }
+};
+
+test "LogSinkInterface forwards level, scope, and elapsed time to sink" {
+    const Log = LogSinkInterface(CapturingLogSink);
+    CapturingLogSink.reset();
+
+    Log.write(.info, "player", 1.5, "spawned at ({d}, {d})", .{ 10, 20 });
+
+    try testing.expectEqual(root.LogLevel.info, CapturingLogSink.last_level.?);
+    try testing.expectEqualStrings("player", CapturingLogSink.last_scope);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), CapturingLogSink.last_elapsed, 1e-9);
+    try testing.expectEqual(@as(usize, 1), CapturingLogSink.call_count);
+}
+
+test "LogSinkInterface tracks multiple writes" {
+    const Log = LogSinkInterface(CapturingLogSink);
+    CapturingLogSink.reset();
+
+    Log.write(.debug, "physics", 0.0, "step", .{});
+    Log.write(.warn, "audio", 2.5, "buffer underrun", .{});
+
+    try testing.expectEqual(root.LogLevel.warn, CapturingLogSink.last_level.?);
+    try testing.expectEqualStrings("audio", CapturingLogSink.last_scope);
+    try testing.expectApproxEqAbs(@as(f64, 2.5), CapturingLogSink.last_elapsed, 1e-9);
+    try testing.expectEqual(@as(usize, 2), CapturingLogSink.call_count);
+}
+
+test "LogSinkInterface with empty scope" {
+    const Log = LogSinkInterface(CapturingLogSink);
+    CapturingLogSink.reset();
+
+    Log.write(.err, "", 0.123, "fatal", .{});
+
+    try testing.expectEqual(root.LogLevel.err, CapturingLogSink.last_level.?);
+    try testing.expectEqualStrings("", CapturingLogSink.last_scope);
+}
+
+test "StubLogSink is a valid LogSinkInterface implementation" {
+    const Log = LogSinkInterface(StubLogSink);
+    Log.write(.info, "test", 0.0, "{s}", .{"msg"});
+    Log.flush();
+}
+
+test "StderrLogSink is a valid LogSinkInterface implementation" {
+    // Validates the full write path compiles (format string + tuple concat).
+    // Output goes to stderr which is expected in test runs.
+    const Log = LogSinkInterface(StderrLogSink);
+    Log.write(.debug, "test", 0.0, "compile check", .{});
 }

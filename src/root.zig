@@ -13,6 +13,7 @@ pub const log = @import("log.zig");
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
 pub const MergeHooks = dispatcher.MergeHooks;
+pub const MergeHookPayloads = dispatcher.MergeHookPayloads;
 pub const UnwrapReceiver = dispatcher.UnwrapReceiver;
 
 pub const Ecs = ecs.Ecs;

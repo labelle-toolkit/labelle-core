@@ -109,6 +109,65 @@ test "MergeHooks: calls receivers in tuple order" {
     try testing.expectEqual('b', order[2]);
 }
 
+const MergeHookPayloads = root.MergeHookPayloads;
+
+test "MergeHookPayloads: merges two unions into one" {
+    const EnginePayload = union(enum) {
+        frame_start: u32,
+        entity_created: u64,
+    };
+    const PluginPayload = union(enum) {
+        collision_begin: struct { a: u32, b: u32 },
+        collision_end: struct { a: u32, b: u32 },
+    };
+
+    const Merged = MergeHookPayloads(.{ EnginePayload, PluginPayload });
+
+    // Should have all 4 fields
+    const fields = @typeInfo(Merged).@"union".fields;
+    try testing.expectEqual(4, fields.len);
+
+    // Can construct and switch on merged values
+    const v1: Merged = .{ .frame_start = 42 };
+    const v2: Merged = .{ .collision_begin = .{ .a = 1, .b = 2 } };
+
+    switch (v1) {
+        .frame_start => |val| try testing.expectEqual(42, val),
+        else => unreachable,
+    }
+    switch (v2) {
+        .collision_begin => |val| {
+            try testing.expectEqual(1, val.a);
+            try testing.expectEqual(2, val.b);
+        },
+        else => unreachable,
+    }
+}
+
+test "MergeHookPayloads: works with HookDispatcher" {
+    const PayloadA = union(enum) { ping: u32 };
+    const PayloadB = union(enum) { pong: []const u8 };
+    const Merged = MergeHookPayloads(.{ PayloadA, PayloadB });
+
+    const Receiver = struct {
+        ping_val: u32 = 0,
+        pub fn ping(self: *@This(), val: u32) void {
+            self.ping_val = val;
+        }
+    };
+
+    var recv = Receiver{};
+    const D = HookDispatcher(Merged, *Receiver, .{});
+    const d = D{ .receiver = &recv };
+
+    d.emit(.{ .ping = 99 });
+    try testing.expectEqual(99, recv.ping_val);
+
+    // pong has no handler — should be a no-op
+    d.emit(.{ .pong = "hello" });
+    try testing.expectEqual(99, recv.ping_val);
+}
+
 test "MockEcsBackend: create entity, add/get/has/remove component" {
     var backend = MockEcsBackend(u32).init(testing.allocator);
     defer backend.deinit();

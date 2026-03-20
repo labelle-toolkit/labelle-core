@@ -12,6 +12,8 @@ pub const GizmoDraw = struct {
     color: u32 = 0xFF00FF00, // default green (ARGB)
     group: []const u8 = "",
     space: Space = .world,
+    /// Category index for per-category enable/disable. 0 = "all" (uncategorized).
+    category: u8 = 0,
 
     pub const Kind = enum { line, rect, circle, arrow, text };
     pub const Space = enum { world, screen };

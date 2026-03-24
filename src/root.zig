@@ -9,6 +9,7 @@ pub const gizmos = @import("gizmos.zig");
 pub const render = @import("render.zig");
 pub const hierarchy = @import("hierarchy.zig");
 pub const log = @import("log.zig");
+pub const save_policy = @import("save_policy.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -45,6 +46,10 @@ pub const LogLevel = log.LogLevel;
 pub const LogSinkInterface = log.LogSinkInterface;
 pub const StubLogSink = log.StubLogSink;
 pub const StderrLogSink = log.StderrLogSink;
+
+pub const SavePolicy = save_policy.SavePolicy;
+pub const hasSavePolicy = save_policy.hasSavePolicy;
+pub const getSavePolicy = save_policy.getSavePolicy;
 
 pub const ParentComponent = hierarchy.ParentComponent;
 pub const ChildrenComponent = hierarchy.ChildrenComponent;

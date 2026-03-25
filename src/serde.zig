@@ -232,6 +232,26 @@ pub fn writeRefArrays(comptime T: type, value: *const T, writer: anytype) !void 
     try writer.writeAll("}");
 }
 
+/// Write ref array fields without outer braces — for embedding in a shared JSON object.
+pub fn writeRefArrayFields(comptime T: type, value: *const T, writer: anytype) !void {
+    const arr_fields = comptime sp.getRefArrayFields(T);
+    if (arr_fields.len == 0) return;
+    var first = true;
+    inline for (arr_fields) |field_name| {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"");
+        try writer.writeAll(field_name);
+        try writer.writeAll("\": [");
+        const slice = @field(value.*, field_name);
+        for (slice, 0..) |id, i| {
+            if (i > 0) try writer.writeAll(",");
+            try std.fmt.format(writer, "{d}", .{id});
+        }
+        try writer.writeAll("]");
+        first = false;
+    }
+}
+
 /// Check if a type has entity ref array fields.
 pub fn hasRefArrayFields(comptime T: type) bool {
     return comptime sp.getRefArrayFields(T).len > 0;

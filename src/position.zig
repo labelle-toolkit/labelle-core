@@ -1,6 +1,9 @@
 const std = @import("std");
+const save_policy = @import("save_policy.zig");
 
 pub const Position = struct {
+    pub const save = save_policy.Saveable(.saveable, @This(), .{});
+
     x: f32 = 0,
     y: f32 = 0,
 

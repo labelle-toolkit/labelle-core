@@ -110,8 +110,9 @@ pub fn readComponent(comptime T: type, value: std.json.Value, comptime skipField
         .int, .comptime_int => {
             return switch (value) {
                 .integer => @intCast(value.integer),
-                .number_string => |s| std.fmt.parseInt(@TypeOf(@as(T, undefined)), s, 10) catch 0,
-                else => 0,
+                .number_string => |s| std.fmt.parseInt(@TypeOf(@as(T, undefined)), s, 10) catch
+                    return error.InvalidNumber,
+                else => return error.InvalidNumber,
             };
         },
         .bool => {
@@ -251,13 +252,13 @@ pub fn readRefArrays(
     json_obj: std.json.ObjectMap,
     id_map: *const std.AutoHashMap(u64, u64),
     arena: std.mem.Allocator,
-) void {
+) !void {
     const arr_fields = comptime sp.getRefArrayFields(T);
     if (arr_fields.len == 0) return;
     inline for (arr_fields) |field_name| {
         if (json_obj.get(field_name)) |arr_val| {
             const items = arr_val.array.items;
-            const slice = arena.alloc(u64, items.len) catch return;
+            const slice = try arena.alloc(u64, items.len);
             for (items, 0..) |item, i| {
                 const saved_id: u64 = @intCast(item.integer);
                 slice[i] = remapId(saved_id, id_map);

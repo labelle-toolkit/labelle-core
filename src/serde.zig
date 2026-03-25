@@ -124,6 +124,10 @@ pub fn readComponent(comptime T: type, value: std.json.Value, comptime skipField
 
 /// Update an existing component in-place from JSON, skipping runtime-derived fields.
 pub fn readComponentInto(comptime T: type, comp: *T, value: std.json.Value, comptime skipField: fn (type, []const u8) bool) !void {
+    if (comptime isEnumSet(T)) {
+        comp.* = readEnumSet(T, value);
+        return;
+    }
     const info = @typeInfo(T);
     switch (info) {
         .@"struct" => {
@@ -182,20 +186,9 @@ pub fn remapEntityRefs(comptime T: type, comp: *T, id_map: *const std.AutoHashMa
     const ref_fields = comptime sp.getEntityRefFields(T);
     inline for (ref_fields) |field_name| {
         if (comptime sp.isRemapExcluded(T, field_name)) {
-            // Excluded fields: only remap if the value exists in the map.
-            // Sentinel values (not in the map) are preserved as-is.
-            const FieldType = @TypeOf(@field(comp, field_name));
-            if (FieldType == u64) {
-                if (id_map.get(@field(comp, field_name))) |new_id| {
-                    @field(comp, field_name) = new_id;
-                }
-            } else if (FieldType == ?u64) {
-                if (@field(comp, field_name)) |val| {
-                    if (id_map.get(val)) |new_id| {
-                        @field(comp, field_name) = new_id;
-                    }
-                }
-            }
+            // Excluded fields are never remapped — they may hold sentinel
+            // values or non-entity data that must be preserved as-is.
+            continue;
         } else {
             const FieldType = @TypeOf(@field(comp, field_name));
             if (FieldType == u64) {
@@ -277,11 +270,12 @@ pub fn componentName(comptime T: type) []const u8 {
     return full[idx + 1 ..];
 }
 
-/// Parse a JSON value as the given float type, handling both float and integer representations.
+/// Parse a JSON value as the given float type, handling float, integer, and number_string.
 pub fn jsonFloatAs(comptime T: type, value: std.json.Value) T {
     return switch (value) {
         .float => @floatCast(value.float),
         .integer => @floatFromInt(value.integer),
+        .number_string => |s| std.fmt.parseFloat(T, s) catch 0.0,
         else => 0.0,
     };
 }
@@ -456,17 +450,17 @@ test "remapEntityRefs: with remap_exclude" {
     defer map.deinit();
     try map.put(10, 100);
 
-    // Normal field remaps
+    // Normal field remaps, excluded field is never touched
     var c1 = Comp{ .target = 10, .sentinel_field = 10 };
     remapEntityRefs(Comp, &c1, &map);
     try testing.expectEqual(@as(u64, 100), c1.target);
-    try testing.expectEqual(@as(?u64, 100), c1.sentinel_field); // in map, so remaps
+    try testing.expectEqual(@as(?u64, 10), c1.sentinel_field); // excluded — never remapped
 
-    // Excluded field with sentinel (not in map) — preserved
+    // Excluded field with sentinel — always preserved
     var c2 = Comp{ .target = 10, .sentinel_field = 999 };
     remapEntityRefs(Comp, &c2, &map);
     try testing.expectEqual(@as(u64, 100), c2.target);
-    try testing.expectEqual(@as(?u64, 999), c2.sentinel_field); // NOT in map, preserved
+    try testing.expectEqual(@as(?u64, 999), c2.sentinel_field); // excluded — preserved
 
     // Excluded field null — preserved
     var c3 = Comp{ .target = 10, .sentinel_field = null };

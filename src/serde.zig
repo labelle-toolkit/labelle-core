@@ -105,7 +105,7 @@ pub fn readComponent(comptime T: type, value: std.json.Value, comptime skipField
             return try readComponent(opt.child, value, skipField);
         },
         .float => {
-            return jsonFloat(value);
+            return jsonFloatAs(T, value);
         },
         .int, .comptime_int => {
             return switch (value) {
@@ -277,13 +277,18 @@ pub fn componentName(comptime T: type) []const u8 {
     return full[idx + 1 ..];
 }
 
-/// Parse a JSON value as f32, handling both float and integer representations.
-pub fn jsonFloat(value: std.json.Value) f32 {
+/// Parse a JSON value as the given float type, handling both float and integer representations.
+pub fn jsonFloatAs(comptime T: type, value: std.json.Value) T {
     return switch (value) {
         .float => @floatCast(value.float),
         .integer => @floatFromInt(value.integer),
         else => 0.0,
     };
+}
+
+/// Parse a JSON value as f32. Convenience wrapper for backward compat.
+pub fn jsonFloat(value: std.json.Value) f32 {
+    return jsonFloatAs(f32, value);
 }
 
 /// Check if a type is an EnumSet (has Key, MaskInt, insert declarations).

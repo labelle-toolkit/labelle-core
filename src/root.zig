@@ -10,6 +10,7 @@ pub const render = @import("render.zig");
 pub const hierarchy = @import("hierarchy.zig");
 pub const log = @import("log.zig");
 pub const save_policy = @import("save_policy.zig");
+pub const serde = @import("serde.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -48,8 +49,19 @@ pub const StubLogSink = log.StubLogSink;
 pub const StderrLogSink = log.StderrLogSink;
 
 pub const SavePolicy = save_policy.SavePolicy;
+pub const Saveable = save_policy.Saveable;
+pub const SaveableOptions = save_policy.SaveableOptions;
 pub const hasSavePolicy = save_policy.hasSavePolicy;
 pub const getSavePolicy = save_policy.getSavePolicy;
+pub const getEntityRefFields = save_policy.getEntityRefFields;
+pub const getSkipFields = save_policy.getSkipFields;
+pub const getRefArrayFields = save_policy.getRefArrayFields;
+pub const getRemapExclude = save_policy.getRemapExclude;
+pub const hasPostLoad = save_policy.hasPostLoad;
+pub const getPostLoadMarkers = save_policy.getPostLoadMarkers;
+pub const getPostLoadCreate = save_policy.getPostLoadCreate;
+pub const isRemapExcluded = save_policy.isRemapExcluded;
+pub const shouldSkipField = save_policy.shouldSkipField;
 
 pub const ParentComponent = hierarchy.ParentComponent;
 pub const ChildrenComponent = hierarchy.ChildrenComponent;

@@ -235,11 +235,13 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
         }
 
         pub fn getComponent(self: *Self, entity: EntityType, comptime T: type) ?*T {
+            if (!self.alive.contains(entity)) return null;
             const storage = self.getStorage(T) orelse return null;
             return storage.getPtr(entity);
         }
 
         pub fn hasComponent(self: *Self, entity: EntityType, comptime T: type) bool {
+            if (!self.alive.contains(entity)) return false;
             const storage = self.getStorage(T) orelse return false;
             return storage.contains(entity);
         }

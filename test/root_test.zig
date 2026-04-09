@@ -696,3 +696,21 @@ test "StderrLogSink is a valid LogSinkInterface implementation" {
     const Log = LogSinkInterface(StderrLogSink);
     Log.write(.debug, "test", 0.0, "compile check", .{});
 }
+
+test "TypedLog is reachable through the labelle-core public API" {
+    // The typed structured-decision log is consumed by caretaker rules,
+    // schedulers, and command buffers. This test exists to catch a
+    // regression where the re-export breaks without anyone noticing.
+    var log = root.TypedLog(4){};
+    log.setTick(7);
+    log.add("test", "entity {d}", .{42});
+
+    try testing.expectEqual(@as(usize, 1), log.slice().len);
+    try testing.expectEqualStrings("test", log.slice()[0].rule);
+    try testing.expectEqual(@as(u64, 7), log.slice()[0].tick);
+    try testing.expectEqualStrings("entity 42", log.slice()[0].message());
+
+    // LogEntry is also a public re-export.
+    const entry: root.LogEntry = .{ .rule = "x", .msg_len = 0 };
+    try testing.expectEqualStrings("x", entry.rule);
+}

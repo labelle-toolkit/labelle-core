@@ -71,8 +71,17 @@ pub fn TypedLog(comptime CAP: usize) type {
         }
 
         /// Append an entry. Silently no-ops if the buffer is full.
-        /// `bufPrint` failure (formatted message exceeds MAX_MSG_LEN)
-        /// truncates the message rather than failing.
+        ///
+        /// If the formatted message exceeds `MAX_MSG_LEN`, the entry's
+        /// message is truncated to a valid prefix of what would have
+        /// been written. We use `std.Io.Writer.fixed` (rather than
+        /// `std.fmt.bufPrint`) so the truncation case never exposes
+        /// uninitialized buffer bytes — `Writer.fixed`'s drain handler
+        /// fills the buffer as much as possible before returning
+        /// `error.WriteFailed`, so `w.end` always points at a valid
+        /// prefix. (`bufPrint` makes no such guarantee on
+        /// `error.NoSpaceLeft`, which is undefined behavior territory
+        /// for the bytes we'd otherwise have to read.)
         pub fn add(
             self: *Self,
             rule: []const u8,
@@ -83,8 +92,12 @@ pub fn TypedLog(comptime CAP: usize) type {
             const e = &self.entries[self.count];
             e.rule = rule;
             e.tick = self.current_tick;
-            const written = std.fmt.bufPrint(&e.msg_buf, fmt, args) catch e.msg_buf[0..MAX_MSG_LEN];
-            e.msg_len = written.len;
+            var w = std.Io.Writer.fixed(&e.msg_buf);
+            // print returns error.WriteFailed when the buffer fills;
+            // we deliberately swallow it because truncation is the
+            // documented behavior for oversize messages.
+            w.print(fmt, args) catch {};
+            e.msg_len = w.end;
             self.count += 1;
         }
 
@@ -94,8 +107,8 @@ pub fn TypedLog(comptime CAP: usize) type {
             return self.entries[0..self.count];
         }
 
-        /// True iff `count == CAP`. Useful for tests that want to assert
-        /// "we did NOT overflow."
+        /// True when the log is full (`count >= CAP`). Subsequent
+        /// `add` calls silently no-op until `reset` is called.
         pub fn isFull(self: *const Self) bool {
             return self.count >= CAP;
         }
@@ -148,15 +161,35 @@ test "add silently no-ops past CAP" {
     try testing.expectEqualStrings("third", log.slice()[2].message());
 }
 
-test "bufPrint failure truncates rather than failing" {
+test "oversize message: truncates to a valid prefix, never garbage" {
     var log = TypedLog(4){};
-    // Build a format that produces well over MAX_MSG_LEN bytes.
+    // Build a format that produces well over MAX_MSG_LEN bytes of 'x'.
     log.add("oversize", "{s}", .{"x" ** (MAX_MSG_LEN * 2)});
 
     try testing.expectEqual(@as(usize, 1), log.count);
-    // Length is clamped to the buffer; content is the unwritten buffer
-    // (per the catch arm) — what matters is that the call did not error.
-    try testing.expectEqual(@as(usize, MAX_MSG_LEN), log.slice()[0].msg_len);
+
+    const msg = log.slice()[0].message();
+    // The truncation point may land anywhere up to MAX_MSG_LEN; what
+    // matters is that every byte we read is one we wrote (i.e., 'x').
+    // The previous implementation could expose uninitialized bytes
+    // here — both Cursor Bugbot and Gemini caught it on labelle-core#9.
+    try testing.expect(msg.len <= MAX_MSG_LEN);
+    try testing.expect(msg.len > 0);
+    for (msg) |c| {
+        try testing.expectEqual(@as(u8, 'x'), c);
+    }
+}
+
+test "moderate-length message: written exactly, no truncation" {
+    var log = TypedLog(4){};
+    // 50 bytes — well under MAX_MSG_LEN = 160.
+    log.add("ok", "{s}", .{"x" ** 50});
+
+    try testing.expectEqual(@as(usize, 1), log.count);
+    try testing.expectEqual(@as(usize, 50), log.slice()[0].msg_len);
+    for (log.slice()[0].message()) |c| {
+        try testing.expectEqual(@as(u8, 'x'), c);
+    }
 }
 
 test "slice is empty for an untouched log" {

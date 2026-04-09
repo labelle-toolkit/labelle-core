@@ -9,6 +9,7 @@ pub const gizmos = @import("gizmos.zig");
 pub const render = @import("render.zig");
 pub const hierarchy = @import("hierarchy.zig");
 pub const log = @import("log.zig");
+pub const typed_log = @import("typed_log.zig");
 pub const save_policy = @import("save_policy.zig");
 pub const serde = @import("serde.zig");
 
@@ -47,6 +48,9 @@ pub const LogLevel = log.LogLevel;
 pub const LogSinkInterface = log.LogSinkInterface;
 pub const StubLogSink = log.StubLogSink;
 pub const StderrLogSink = log.StderrLogSink;
+
+pub const LogEntry = typed_log.LogEntry;
+pub const TypedLog = typed_log.TypedLog;
 
 pub const SavePolicy = save_policy.SavePolicy;
 pub const Saveable = save_policy.Saveable;

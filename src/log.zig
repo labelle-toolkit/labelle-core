@@ -63,10 +63,31 @@ pub const StubLogSink = struct {
     ) void {}
 };
 
-/// Default stderr log sink — writes to std.debug.print.
-/// Suitable for desktop builds. Format: [1.234s] INFO  scope: message
+/// Default stderr log sink — writes to std.debug.print on desktop and to
+/// `__android_log_print` on Android (because Android stderr goes nowhere
+/// visible; everything ships through logcat).
+/// Format: [1.234s] INFO  scope: message
 pub const StderrLogSink = struct {
     const std = @import("std");
+
+    const is_android = builtin.target.abi == .android or builtin.target.abi == .androideabi;
+
+    // Android NDK liblog priorities
+    const ANDROID_LOG_DEBUG: c_int = 3;
+    const ANDROID_LOG_INFO: c_int = 4;
+    const ANDROID_LOG_WARN: c_int = 5;
+    const ANDROID_LOG_ERROR: c_int = 6;
+
+    extern fn __android_log_write(prio: c_int, tag: [*:0]const u8, msg: [*:0]const u8) c_int;
+
+    fn androidPrio(level: LogLevel) c_int {
+        return switch (level) {
+            .debug => ANDROID_LOG_DEBUG,
+            .info => ANDROID_LOG_INFO,
+            .warn => ANDROID_LOG_WARN,
+            .err => ANDROID_LOG_ERROR,
+        };
+    }
 
     pub fn write(
         level: LogLevel,
@@ -76,6 +97,22 @@ pub const StderrLogSink = struct {
         args: anytype,
     ) void {
         const prefix = comptime if (scope.len > 0) scope ++ ": " else "";
-        std.debug.print("[{d:.3}s] {s:<5} " ++ prefix ++ fmt ++ "\n", .{elapsed_s, level.label()} ++ args);
+        if (comptime is_android) {
+            // Format into a stack buffer, NUL-terminate, hand off to logcat.
+            // 1 KiB matches the NDK's per-message limit before truncation.
+            var buf: [1024]u8 = undefined;
+            const formatted = std.fmt.bufPrint(
+                &buf,
+                "[{d:.3}s] " ++ prefix ++ fmt ++ "\x00",
+                .{elapsed_s} ++ args,
+            ) catch blk: {
+                buf[buf.len - 1] = 0;
+                break :blk buf[0 .. buf.len - 1 :0];
+            };
+            const msg_z: [*:0]const u8 = @ptrCast(formatted.ptr);
+            _ = __android_log_write(androidPrio(level), "labelle", msg_z);
+        } else {
+            std.debug.print("[{d:.3}s] {s:<5} " ++ prefix ++ fmt ++ "\n", .{ elapsed_s, level.label() } ++ args);
+        }
     }
 };

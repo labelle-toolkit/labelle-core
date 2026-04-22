@@ -182,6 +182,13 @@ pub fn remapOptId(id: ?u64, id_map: *const std.AutoHashMap(u64, u64)) ?u64 {
 
 /// Auto-remap entity ID fields, respecting remap_exclude.
 /// Works with both new-style Saveable and legacy entity_ref_fields.
+///
+/// Accepts `entity_refs` fields of any unsigned-integer type (or
+/// optional thereof), cast through `u64` for the ID-map lookup. This
+/// lets ECS backends that use a narrower `Entity` type (e.g. zig-ecs
+/// uses `u32`) carry Parent / sibling component references safely —
+/// the u64 table is authoritative during load, but the stored field
+/// keeps its native width.
 pub fn remapEntityRefs(comptime T: type, comp: *T, id_map: *const std.AutoHashMap(u64, u64)) void {
     const ref_fields = comptime sp.getEntityRefFields(T);
     inline for (ref_fields) |field_name| {
@@ -189,14 +196,36 @@ pub fn remapEntityRefs(comptime T: type, comp: *T, id_map: *const std.AutoHashMa
             // Excluded fields are never remapped — they may hold sentinel
             // values or non-entity data that must be preserved as-is.
             continue;
-        } else {
-            const FieldType = @TypeOf(@field(comp, field_name));
-            if (FieldType == u64) {
-                @field(comp, field_name) = remapId(@field(comp, field_name), id_map);
-            } else if (FieldType == ?u64) {
-                @field(comp, field_name) = remapOptId(@field(comp, field_name), id_map);
-            }
         }
+        const FieldType = @TypeOf(@field(comp, field_name));
+        remapIntOrOptInt(FieldType, &@field(comp, field_name), id_map);
+    }
+}
+
+/// Cast an unsigned-integer (or optional thereof) through `u64` for
+/// remap, then back to the field's native width. No-op for non-integer
+/// field types — consistent with the previous behaviour, which only
+/// handled `u64` / `?u64`.
+fn remapIntOrOptInt(comptime FieldType: type, field_ptr: *FieldType, id_map: *const std.AutoHashMap(u64, u64)) void {
+    const info = @typeInfo(FieldType);
+    switch (info) {
+        .int => |int_info| {
+            if (int_info.signedness != .unsigned) return;
+            const as_u64: u64 = @intCast(field_ptr.*);
+            const mapped = remapId(as_u64, id_map);
+            field_ptr.* = @intCast(mapped);
+        },
+        .optional => |opt_info| {
+            const child_info = @typeInfo(opt_info.child);
+            if (child_info != .int) return;
+            if (child_info.int.signedness != .unsigned) return;
+            if (field_ptr.*) |v| {
+                const as_u64: u64 = @intCast(v);
+                const mapped = remapId(as_u64, id_map);
+                field_ptr.* = @intCast(mapped);
+            }
+        },
+        else => {},
     }
 }
 
@@ -487,6 +516,42 @@ test "remapEntityRefs: with remap_exclude" {
     remapEntityRefs(Comp, &c3, &map);
     try testing.expectEqual(@as(u64, 100), c3.target);
     try testing.expectEqual(@as(?u64, null), c3.sentinel_field);
+}
+
+test "remapEntityRefs: narrower unsigned-integer fields (Entity = u32)" {
+    // Guards the #11/#12 fix on flying-platform side: `ParentComponent`
+    // is generic over Entity, and the zig-ecs backend picks `u32`. The
+    // pre-fix code only matched `u64` / `?u64` exactly, so every non-u64
+    // entity ref silently no-opped on load and children kept pointing at
+    // stale IDs.
+    const Comp = struct {
+        pub const save = sp.Saveable(.saveable, @This(), .{
+            .entity_refs = &.{ "parent", "sibling" },
+        });
+        parent: u32 = 0,
+        sibling: ?u32 = null,
+    };
+
+    var map = std.AutoHashMap(u64, u64).init(testing.allocator);
+    defer map.deinit();
+    try map.put(7, 700);
+    try map.put(9, 900);
+
+    var c = Comp{ .parent = 7, .sibling = 9 };
+    remapEntityRefs(Comp, &c, &map);
+    try testing.expectEqual(@as(u32, 700), c.parent);
+    try testing.expectEqual(@as(?u32, 900), c.sibling);
+
+    var c_null = Comp{ .parent = 7, .sibling = null };
+    remapEntityRefs(Comp, &c_null, &map);
+    try testing.expectEqual(@as(u32, 700), c_null.parent);
+    try testing.expectEqual(@as(?u32, null), c_null.sibling);
+
+    // Unmapped IDs stay put (same contract as `remapId`).
+    var c_miss = Comp{ .parent = 42, .sibling = 42 };
+    remapEntityRefs(Comp, &c_miss, &map);
+    try testing.expectEqual(@as(u32, 42), c_miss.parent);
+    try testing.expectEqual(@as(?u32, 42), c_miss.sibling);
 }
 
 test "remapEntityRefs: legacy style" {

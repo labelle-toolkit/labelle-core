@@ -1,10 +1,20 @@
 /// Hierarchy components — universal parent-child relationship types.
 /// These live in core so both engine and renderer plugins can use them.
 
+const save_policy = @import("save_policy.zig");
+
 /// Parent component — establishes parent-child hierarchy for position inheritance.
 /// Parameterized by Entity type since we don't know the ECS backend at definition time.
+///
+/// Marked `.saveable` so parent-child relationships survive save/load;
+/// `ChildrenComponent` is transient and rebuilt from `ParentComponent`
+/// on load.
 pub fn ParentComponent(comptime Entity: type) type {
     return struct {
+        pub const save = save_policy.Saveable(.saveable, @This(), .{
+            .entity_refs = &.{"entity"},
+        });
+
         entity: Entity,
         inherit_rotation: bool = false,
         inherit_scale: bool = false,

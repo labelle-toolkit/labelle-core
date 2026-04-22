@@ -484,6 +484,32 @@ test "ParentComponent and ChildrenComponent" {
     try testing.expectEqual(@as(usize, 0), c.count());
 }
 
+test "ParentComponent is saveable with entity ref" {
+    // Regression for #11 — Parent used to have no save declaration, so
+    // parent-child hierarchies were lost on save/load and children
+    // rendered at their saved local Position as if it were world-space.
+    // This test pins the save contract: `.saveable` + `entity` in
+    // `entity_refs` so the ID-remap table rewrites the parent handle
+    // on load.
+    const Parent = ParentComponent(u32);
+
+    try testing.expect(root.hasSavePolicy(Parent));
+    try testing.expectEqual(root.SavePolicy.saveable, root.getSavePolicy(Parent).?);
+
+    const refs = root.getEntityRefFields(Parent);
+    try testing.expectEqual(@as(usize, 1), refs.len);
+    try testing.expectEqualStrings("entity", refs[0]);
+}
+
+test "ChildrenComponent stays transient (rebuilt from Parent on load)" {
+    // The engine derives Children from Parent, so persisting it would
+    // double-source the relationship. Keep it unsaved — Parent is the
+    // authoritative edge. If this test starts failing, the Parent-only
+    // save strategy in #11 is out of sync with the hierarchy design.
+    const Children = ChildrenComponent(u32);
+    try testing.expect(!root.hasSavePolicy(Children));
+}
+
 test "gameToScreen: converts Y-up to Y-down" {
     // Screen height 600: game y=0 (bottom) -> screen y=600 (bottom)
     try testing.expectEqual(@as(f32, 600.0), gameToScreen(0, 600));

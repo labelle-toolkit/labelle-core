@@ -22,6 +22,8 @@ const RenderInterface = root.RenderInterface;
 const StubRender = root.StubRender;
 const ParentComponent = root.ParentComponent;
 const ChildrenComponent = root.ChildrenComponent;
+const PrefabInstance = root.PrefabInstance;
+const PrefabChild = root.PrefabChild;
 const CoordinateSystem = root.CoordinateSystem;
 const GamePosition = root.GamePosition;
 const ScreenPosition = root.ScreenPosition;
@@ -508,6 +510,69 @@ test "ChildrenComponent stays transient (rebuilt from Parent on load)" {
     // save strategy in #11 is out of sync with the hierarchy design.
     const Children = ChildrenComponent(u32);
     try testing.expect(!root.hasSavePolicy(Children));
+}
+
+test "PrefabInstance: default construction + field shape" {
+    const pi = PrefabInstance{};
+    try testing.expectEqualStrings("", pi.path);
+    try testing.expectEqualStrings("", pi.overrides);
+
+    const seeded = PrefabInstance{
+        .path = "hydroponics",
+        .overrides = "{\"Position\":{\"x\":156}}",
+    };
+    try testing.expectEqualStrings("hydroponics", seeded.path);
+    try testing.expectEqualStrings("{\"Position\":{\"x\":156}}", seeded.overrides);
+}
+
+test "PrefabInstance is saveable (no entity refs)" {
+    // PrefabInstance carries no entity handles — just the prefab path
+    // + opaque overrides blob. `.saveable` + empty `entity_refs` pins
+    // that contract so the engine's save mixin knows to round-trip it
+    // without running the ID-remap table over anything.
+    try testing.expect(root.hasSavePolicy(PrefabInstance));
+    try testing.expectEqual(root.SavePolicy.saveable, root.getSavePolicy(PrefabInstance).?);
+
+    const refs = root.getEntityRefFields(PrefabInstance);
+    try testing.expectEqual(@as(usize, 0), refs.len);
+}
+
+test "PrefabChild: default construction + field shape" {
+    const Child = PrefabChild(u32);
+    const c = Child{ .root = 42, .local_path = "children[0]" };
+    try testing.expectEqual(@as(u32, 42), c.root);
+    try testing.expectEqualStrings("children[0]", c.local_path);
+}
+
+test "PrefabChild is saveable with entity ref on `root`" {
+    // `root` points back at the PrefabInstance root entity and MUST
+    // be remapped through the load `id_map` — otherwise children of a
+    // prefab would lose their lineage back to the root entity after
+    // save/load, breaking the two-phase restore's `(root, local_path)`
+    // keying. Mirrors `ParentComponent`'s `entity_refs = &.{"entity"}`
+    // contract (see the Parent test above).
+    const Child = PrefabChild(u32);
+
+    try testing.expect(root.hasSavePolicy(Child));
+    try testing.expectEqual(root.SavePolicy.saveable, root.getSavePolicy(Child).?);
+
+    const refs = root.getEntityRefFields(Child);
+    try testing.expectEqual(@as(usize, 1), refs.len);
+    try testing.expectEqualStrings("root", refs[0]);
+}
+
+test "PrefabChild generic: different Entity types compile independently" {
+    // Confirms the comptime generic accepts any unsigned integer
+    // Entity handle type without collapsing them to the same concrete
+    // type (zig-ecs uses u32; future backends could differ).
+    const C32 = PrefabChild(u32);
+    const C64 = PrefabChild(u64);
+    try testing.expect(C32 != C64);
+
+    const c32 = C32{ .root = 1, .local_path = "children[0]" };
+    const c64 = C64{ .root = 0xFFFF_FFFF_0000_0000, .local_path = "children[1]" };
+    try testing.expectEqual(@as(u32, 1), c32.root);
+    try testing.expectEqual(@as(u64, 0xFFFF_FFFF_0000_0000), c64.root);
 }
 
 test "gameToScreen: converts Y-up to Y-down" {

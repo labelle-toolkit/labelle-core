@@ -8,6 +8,7 @@ pub const gui = @import("gui.zig");
 pub const gizmos = @import("gizmos.zig");
 pub const render = @import("render.zig");
 pub const hierarchy = @import("hierarchy.zig");
+pub const prefab = @import("prefab.zig");
 pub const log = @import("log.zig");
 pub const typed_log = @import("typed_log.zig");
 pub const save_policy = @import("save_policy.zig");
@@ -69,6 +70,9 @@ pub const shouldSkipField = save_policy.shouldSkipField;
 
 pub const ParentComponent = hierarchy.ParentComponent;
 pub const ChildrenComponent = hierarchy.ChildrenComponent;
+
+pub const PrefabInstance = prefab.PrefabInstance;
+pub const PrefabChild = prefab.PrefabChild;
 
 pub const Position = position.Position;
 pub const PositionI = position.PositionI;

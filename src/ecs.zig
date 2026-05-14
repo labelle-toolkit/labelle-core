@@ -93,31 +93,20 @@ pub fn validateComponentTuple(comptime components: anytype) void {
 pub fn QueryResult(comptime EntityType: type, comptime components: anytype) type {
     comptime validateComponentTuple(components);
     const fields_info = @typeInfo(@TypeOf(components)).@"struct".fields;
-    var fields: [fields_info.len + 1]std.builtin.Type.StructField = undefined;
-    fields[0] = .{
-        .name = "entity",
-        .type = EntityType,
-        .default_value_ptr = null,
-        .is_comptime = false,
-        .alignment = @alignOf(EntityType),
-    };
+    var field_names: [fields_info.len + 1][]const u8 = undefined;
+    var field_types: [fields_info.len + 1]type = undefined;
+    var field_attrs: [fields_info.len + 1]std.builtin.Type.StructField.Attributes = undefined;
+    field_names[0] = "entity";
+    field_types[0] = EntityType;
+    field_attrs[0] = .{};
     for (fields_info, 0..) |_, i| {
         const T = components[i];
         const name = std.fmt.comptimePrint("comp_{d}", .{i});
-        fields[i + 1] = .{
-            .name = name,
-            .type = *T,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(*T),
-        };
+        field_names[i + 1] = name;
+        field_types[i + 1] = *T;
+        field_attrs[i + 1] = .{};
     }
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 /// Generic QueryIterator — works for any backend that implements getComponent.
@@ -187,7 +176,7 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
         next_id: EntityType = 1,
         alive: std.AutoHashMap(EntityType, void),
         storages: std.AutoHashMap(usize, *anyopaque),
-        cleanups: std.ArrayListUnmanaged(CleanupFn) = .{},
+        cleanups: std.ArrayListUnmanaged(CleanupFn) = .empty,
         allocator: std.mem.Allocator,
 
         const Self = @This();
@@ -279,7 +268,7 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
 
         /// Create a view iterating entities with the given include/exclude filters.
         pub fn view(self: *Self, comptime includes: anytype, comptime excludes: anytype) View(includes, excludes) {
-            var result: std.ArrayListUnmanaged(EntityType) = .{};
+            var result: std.ArrayListUnmanaged(EntityType) = .empty;
             var it = self.alive.keyIterator();
             while (it.next()) |key_ptr| {
                 const entity = key_ptr.*;
@@ -310,7 +299,7 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
 
         /// Query entities with direct component access.
         pub fn query(self: *Self, comptime components: anytype) QueryIterator(components) {
-            var entities = std.ArrayListUnmanaged(EntityType){};
+            var entities: std.ArrayListUnmanaged(EntityType) = .empty;
             var it = self.alive.keyIterator();
             while (it.next()) |key| {
                 entities.append(self.allocator, key.*) catch @panic("OOM");

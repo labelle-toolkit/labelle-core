@@ -53,10 +53,10 @@ pub fn writeComponent(
             }
         },
         .float => {
-            try std.fmt.format(writer, "{d:.6}", .{value.*});
+            try writer.print("{d:.6}", .{value.*});
         },
         .int, .comptime_int => {
-            try std.fmt.format(writer, "{d}", .{value.*});
+            try writer.print("{d}", .{value.*});
         },
         .bool => {
             try writer.writeAll(if (value.*) "true" else "false");
@@ -253,7 +253,7 @@ pub fn writeRefArrays(comptime T: type, value: *const T, writer: anytype) !void 
         const slice = @field(value.*, field_name);
         for (slice, 0..) |id, i| {
             if (i > 0) try writer.writeAll(",");
-            try std.fmt.format(writer, "{d}", .{id});
+            try writer.print("{d}", .{id});
         }
         try writer.writeAll("]");
         first = false;
@@ -274,7 +274,7 @@ pub fn writeRefArrayFields(comptime T: type, value: *const T, writer: anytype) !
         const slice = @field(value.*, field_name);
         for (slice, 0..) |id, i| {
             if (i > 0) try writer.writeAll(",");
-            try std.fmt.format(writer, "{d}", .{id});
+            try writer.print("{d}", .{id});
         }
         try writer.writeAll("]");
         first = false;

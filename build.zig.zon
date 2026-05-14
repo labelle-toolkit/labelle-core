@@ -2,7 +2,7 @@
     .fingerprint = 0x67d0b17d7091ab39,
     .name = .labelle_core,
     .version = "1.12.0",
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

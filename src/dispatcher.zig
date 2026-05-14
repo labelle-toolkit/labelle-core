@@ -113,23 +113,12 @@ pub fn MergeHooks(
 }
 
 fn ReceiverInstances(comptime Types: anytype) type {
-    var fields: [Types.len]std.builtin.Type.StructField = undefined;
+    var types_arr: [Types.len]type = undefined;
     for (0..Types.len) |i| {
-        const name = std.fmt.comptimePrint("{d}", .{i});
-        fields[i] = .{
-            .name = name,
-            .type = Types[i],
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(Types[i]),
-        };
+        types_arr[i] = Types[i];
     }
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &fields,
-        .decls = &.{},
-        .is_tuple = true,
-    } });
+    const types_final = types_arr;
+    return @Tuple(&types_final);
 }
 
 /// Merge multiple tagged union types into one combined union.
@@ -157,7 +146,9 @@ pub fn MergeHookPayloads(comptime unions: anytype) type {
     }
 
     // Build merged fields array
-    comptime var fields: [total_fields]std.builtin.Type.UnionField = undefined;
+    comptime var field_names: [total_fields][]const u8 = undefined;
+    comptime var field_types: [total_fields]type = undefined;
+    comptime var field_attrs: [total_fields]std.builtin.Type.UnionField.Attributes = undefined;
     comptime var idx: usize = 0;
 
     inline for (unions_info.@"struct".fields) |tuple_field| {
@@ -165,38 +156,32 @@ pub fn MergeHookPayloads(comptime unions: anytype) type {
         const u_info = @typeInfo(U).@"union";
         for (u_info.fields) |field| {
             // Check for duplicates
-            for (fields[0..idx]) |existing| {
-                if (std.mem.eql(u8, existing.name, field.name)) {
+            for (field_names[0..idx]) |existing_name| {
+                if (std.mem.eql(u8, existing_name, field.name)) {
                     @compileError("MergeHookPayloads: duplicate field '" ++ field.name ++ "' found in multiple unions");
                 }
             }
-            fields[idx] = field;
+            field_names[idx] = field.name;
+            field_types[idx] = field.type;
+            field_attrs[idx] = .{ .@"align" = field.alignment };
             idx += 1;
         }
     }
 
-    // Build tag enum
-    comptime var tag_fields: [total_fields]std.builtin.Type.EnumField = undefined;
-    for (fields[0..total_fields], 0..) |field, i| {
-        tag_fields[i] = .{
-            .name = field.name,
-            .value = i,
-        };
+    // Build tag enum values
+    comptime var tag_values: [total_fields]std.math.IntFittingRange(0, if (total_fields > 0) total_fields - 1 else 0) = undefined;
+    for (0..total_fields) |i| {
+        tag_values[i] = @intCast(i);
     }
 
-    const Tag = @Type(.{ .@"enum" = .{
-        .tag_type = std.math.IntFittingRange(0, if (total_fields > 0) total_fields - 1 else 0),
-        .fields = &tag_fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
+    const Tag = @Enum(
+        std.math.IntFittingRange(0, if (total_fields > 0) total_fields - 1 else 0),
+        .exhaustive,
+        &field_names,
+        &tag_values,
+    );
 
-    return @Type(.{ .@"union" = .{
-        .layout = .auto,
-        .tag_type = Tag,
-        .fields = &fields,
-        .decls = &.{},
-    } });
+    return @Union(.auto, Tag, &field_names, &field_types, &field_attrs);
 }
 
 fn fieldIndex(comptime T: type, comptime name: []const u8) ?usize {

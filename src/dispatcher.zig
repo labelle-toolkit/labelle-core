@@ -17,7 +17,7 @@ pub fn HookDispatcher(
 
     comptime {
         for (std.meta.declarations(Base)) |decl| {
-            if (fieldIndex(PayloadUnion, decl.name) == null) {
+            if (!@hasField(PayloadUnion, decl.name)) {
                 if (@hasDecl(Base, decl.name)) {
                     const DeclType = @TypeOf(@field(Base, decl.name));
                     const info = @typeInfo(DeclType);
@@ -72,6 +72,13 @@ pub fn MergeHooks(
     comptime ReceiverTypes: anytype,
 ) type {
     comptime {
+        // This validation walks every receiver × every declaration.
+        // Headroom over Zig's default 1000-branch eval quota so projects
+        // with many hook receivers don't hit a non-obvious "quota
+        // exceeded" wall as their hook surface grows. The per-event
+        // lookup is `@hasField` (O(1)), so the cost here is just the
+        // bounded receiver × declaration product.
+        @setEvalBranchQuota(10000);
         for (ReceiverTypes) |RT| {
             const Base = UnwrapReceiver(RT);
             for (std.meta.declarations(Base)) |decl| {
@@ -79,7 +86,7 @@ pub fn MergeHooks(
                     const DeclType = @TypeOf(@field(Base, decl.name));
                     const info = @typeInfo(DeclType);
                     if (info == .@"fn" and info.@"fn".params.len == 2) {
-                        if (fieldIndex(PayloadUnion, decl.name) == null) {
+                        if (!@hasField(PayloadUnion, decl.name)) {
                             @compileError(
                                 "Handler '" ++ decl.name ++ "' in " ++ @typeName(Base) ++
                                     " doesn't match any event in " ++ @typeName(PayloadUnion),
@@ -182,13 +189,6 @@ pub fn MergeHookPayloads(comptime unions: anytype) type {
     );
 
     return @Union(.auto, Tag, &field_names, &field_types, &field_attrs);
-}
-
-fn fieldIndex(comptime T: type, comptime name: []const u8) ?usize {
-    for (std.meta.fields(T), 0..) |field, i| {
-        if (std.mem.eql(u8, field.name, name)) return i;
-    }
-    return null;
 }
 
 fn fieldNames(comptime T: type) []const u8 {

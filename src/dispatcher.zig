@@ -72,6 +72,13 @@ pub fn MergeHooks(
     comptime ReceiverTypes: anytype,
 ) type {
     comptime {
+        // Each receiver × each declaration is a comptime branch; the
+        // nested loops below blow past Zig's default 1000-branch eval
+        // quota once a project registers ~8+ hook receivers (observed
+        // on flying-platform-labelle adding a storage-counter hook).
+        // The validation work is small and bounded — raise the ceiling
+        // rather than let it fail with a non-obvious "quota exceeded".
+        @setEvalBranchQuota(20000);
         for (ReceiverTypes) |RT| {
             const Base = UnwrapReceiver(RT);
             for (std.meta.declarations(Base)) |decl| {

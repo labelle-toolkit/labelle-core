@@ -193,6 +193,15 @@ fn ReceiverInstances(comptime Types: anytype) type {
 /// The result is a tagged union with all fields from all input unions.
 /// Duplicate field names are a compile error.
 pub fn MergeHookPayloads(comptime unions: anytype) type {
+    // The duplicate-field check below is O(N²) over the combined
+    // variant set; with engine `Events` (labelle-engine#578, 14
+    // variants) plus a couple of plugins, N can climb past 30 and
+    // each `std.mem.eql(u8, ...)` call inside the inner loop trips
+    // Zig's default 1000-branch comptime evaluation cap. Bump it
+    // here so every caller picks it up automatically — the
+    // alternative (every project's generated main.zig sets its own
+    // quota) duplicates the workaround across the toolkit.
+    @setEvalBranchQuota(20000);
     const unions_info = @typeInfo(@TypeOf(unions));
 
     // Count total fields across all unions

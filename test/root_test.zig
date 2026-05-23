@@ -1361,3 +1361,119 @@ test "default_pin_styles: same-class types share a color" {
     // pin into an `EntityId` pin visually distinct.
     try testing.expect(default_pin_styles.entity_id_style.color.?.r != int_color.r);
 }
+
+// ---------------------------------------------------------------------------
+// RFC-FLOW-VOCABULARY §2 / O4 — plugin-declared Coercions.
+//
+// Pin the comptime shape: the factory reflects `From`/`To` from the
+// impl's signature, exposes `convert` as a comptime decl, sets the
+// `__is_labelle_coercion` marker the assembler scans for, and rejects
+// degenerate shapes (`void` return, non-single-param impls) at compile
+// time. Discovery and emission live in labelle-assembler — the
+// contract this module asserts is purely the factory's reflected
+// surface.
+// ---------------------------------------------------------------------------
+
+const Coercion = root.Coercion;
+const Coercions = root.Coercions;
+
+// Sample coercions used below. The thin `body_to_entity` shape is the
+// canonical use case: a nominal bridge between two integer-aliased
+// handle types where the runtime cost is just a copy / reinterpret.
+
+const BodyId = enum(u32) { _ };
+
+fn bodyToEntityImpl(b: BodyId) u32 {
+    return @intFromEnum(b);
+}
+
+fn intToFloatImpl(x: i32) f64 {
+    return @as(f64, @floatFromInt(x));
+}
+
+test "Coercion: From/To reflect from impl signature" {
+    const c = Coercion(.{ .impl = bodyToEntityImpl });
+    const T = @TypeOf(c);
+    try testing.expectEqual(BodyId, T.From);
+    try testing.expectEqual(u32, T.To);
+}
+
+test "Coercion: convert is preserved with original function type" {
+    // Mirror the FlowNode preservation test: the assembler scans the
+    // emitted PluginCoercions for `convert`; downstream codegen reads
+    // it as a normal function. The decl must carry the original Zig
+    // type so reflection sees a single-param fn.
+    const c = Coercion(.{ .impl = bodyToEntityImpl });
+    const T = @TypeOf(c);
+    try testing.expect(@hasDecl(T, "convert"));
+    try testing.expectEqual(@TypeOf(bodyToEntityImpl), @TypeOf(T.convert));
+    try testing.expectEqual(&bodyToEntityImpl, &T.convert);
+}
+
+test "Coercion: marker decl present" {
+    // The assembler keys discovery off this marker — same convention
+    // as `__is_labelle_flow_node` on `FlowNode`.
+    const c = Coercion(.{ .impl = bodyToEntityImpl });
+    try testing.expect(@hasDecl(@TypeOf(c), "__is_labelle_coercion"));
+    try testing.expect(@TypeOf(c).__is_labelle_coercion);
+}
+
+test "Coercion: distinct calls produce distinct return types" {
+    const a = Coercion(.{ .impl = bodyToEntityImpl });
+    const b = Coercion(.{ .impl = intToFloatImpl });
+    try testing.expect(@TypeOf(a) != @TypeOf(b));
+}
+
+test "Coercion: docs round-trip when set" {
+    const c = Coercion(.{
+        .impl = bodyToEntityImpl,
+        .docs = "Reinterpret a BodyId handle as an EntityId.",
+    });
+    try testing.expectEqualStrings(
+        "Reinterpret a BodyId handle as an EntityId.",
+        c.docs.?,
+    );
+}
+
+test "Coercion: docs defaults to null" {
+    const c = Coercion(.{ .impl = bodyToEntityImpl });
+    try testing.expectEqual(@as(?[]const u8, null), c.docs);
+}
+
+test "Coercion: convert is callable and produces the expected value" {
+    // The factory doesn't wrap or rebind `impl`, so `convert(x)` must
+    // dispatch identically to calling the impl directly. Pin that so
+    // codegen's `<plugin>__<name>.convert(<expr>)` site behaves like
+    // a plain function call (no thunks, no `game` smuggling).
+    const T = @TypeOf(Coercion(.{ .impl = bodyToEntityImpl }));
+    const result = T.convert(@enumFromInt(42));
+    try testing.expectEqual(@as(u32, 42), result);
+}
+
+test "Coercions: convention marker is a struct" {
+    // The `Coercions` decl in `flow.zig` is just a documentation
+    // anchor — `@hasDecl(mod, "Coercions")` is the assembler's
+    // contact point, same shape as `PinStyles`.
+    try testing.expectEqual(@typeInfo(Coercions).@"struct".fields.len, 0);
+}
+
+// Compile-error sanitization: every check below documents the
+// negative case as a comment, then asserts the positive case still
+// compiles. Flipping a check from rejection to acceptance shows up
+// here on review.
+
+test "Coercion: single-param impl is the only accepted shape" {
+    // A two-param impl (`fn (game: anytype, x: BodyId) u32`) is rejected
+    // at comptime — coercions don't thread `game` (declare a FlowNode
+    // for that). A zero-param impl is rejected too. The positive case:
+    const c = Coercion(.{ .impl = bodyToEntityImpl });
+    _ = c;
+}
+
+test "Coercion: non-void return is the only accepted shape" {
+    // A `void`-returning impl is rejected at comptime — a coercion
+    // must produce a value to wrap an edge expression. The positive
+    // case:
+    const c = Coercion(.{ .impl = bodyToEntityImpl });
+    _ = c;
+}

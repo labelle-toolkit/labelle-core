@@ -266,6 +266,160 @@ pub fn numericFits(comptime from: type, comptime to: type) bool {
     return false;
 }
 
+// ─── Plugin-declared coercions (RFC-FLOW-VOCABULARY §2, open question O4) ───
+//
+// A coercion is a plugin-declared nominal-type bridge — a `pub fn` that
+// converts a value of one Zig type to another. The wire-fit rule
+// (RFC §2) consults the registry as a final step before refusing a
+// wire: when neither type equality (rule 1) nor numeric widening
+// (rule 2 / O1) match, a registered `(From, To)` pair accepts the
+// wire and codegen wraps the source expression in a
+// `<plugin>__<name>.convert(<expr>)` call at the edge.
+//
+// **Why a separate concept from `FlowNode`**: a coercion is invisible
+// in the palette — the user just draws an edge between two pins and
+// the editor accepts it (or doesn't) based on the registry. A
+// `FlowNode` is a visible, palette-rendered node the user explicitly
+// drops into the graph. A coercion that *needs* game state isn't a
+// coercion — declare it as a `FlowNode` instead.
+//
+// **Design decision (source-only signature)**: a coercion function
+// takes a single `From`-typed parameter and returns a `To`-typed
+// value. It does NOT take `game: anytype` as a first arg the way
+// `FlowNode` impls do. Rationale:
+//   1. The editor's wire-fit check stays pure — it only needs to
+//      reflect on `From` and `To`, not consider `*Game` plumbing.
+//   2. The runtime call site is a plain `convert(x)` — no `game`
+//      threading at the edge, which keeps generated code tidy.
+//   3. If a conversion genuinely needs game state (e.g. resolving
+//      `BodyId → EntityId` via a side-table lookup), the right answer
+//      is a `FlowNode`, not a coercion. Nominal bridges between two
+//      "thin alias" types (newtype-style integer wrappers, etc.)
+//      cover the actual use cases without `game`.
+
+/// One plugin-declared coercion. The editor accepts a wire from a
+/// `From`-typed source pin into a `To`-typed sink pin when no built-in
+/// wire-fit rule matches; codegen wraps the source expression in a
+/// `<plugin>__<name>.convert(<source_expr>)` call at the edge.
+///
+/// Reflection on `impl` provides:
+///   * `From` — the single parameter's type. `comptime` and `anytype`
+///     parameters are rejected at reflection time so the wire-fit
+///     check has a concrete `From` type to match against.
+///   * `To` — `impl`'s return type. A `void` return is rejected — a
+///     coercion must produce a value to wrap an edge expression.
+///   * The function symbol the codegen emits at the call site.
+///
+/// Declared on plugins (or game-script modules) via:
+///
+///     pub const Coercions = struct {
+///         pub const body_to_entity = labelle.flow.Coercion(.{
+///             .impl = bodyToEntityImpl,
+///         });
+///     };
+///
+///     fn bodyToEntityImpl(b: BodyId) EntityId {
+///         return @intFromEnum(b); // or a side-table lookup, etc.
+///     }
+///
+/// Discovery + emission mirror `FlowNodes` / `PinStyles`: the
+/// assembler walks each plugin's `src/root.zig` and each game-script
+/// module's source for `pub const Coercions`, and emits one entry per
+/// declared coercion into a `PluginCoercions` registry the editor and
+/// flow-codegen reflect against.
+///
+/// Like `FlowNode`, this is a comptime factory (not a plain struct)
+/// because Zig forbids `anytype` as a struct-field type — `impl`'s
+/// arbitrary function type must survive reflection without being
+/// coerced through a generic vtable.
+pub fn Coercion(comptime cfg: anytype) CoercionReturn(cfg) {
+    const T = @TypeOf(cfg);
+    return .{
+        .docs = if (@hasField(T, "docs")) cfg.docs else null,
+    };
+}
+
+/// Concrete return type of `Coercion(cfg)`. Each call produces a
+/// distinct type because the function type of `impl` varies per
+/// coercion; reflection consumers (`From`, `To`, `convert`) read
+/// the comptime decls below.
+///
+/// Compile-time validation:
+///   * `impl` is required.
+///   * `impl` must take exactly one parameter (the source value); a
+///     coercion does not thread `game` — declare a `FlowNode` if you
+///     need game state.
+///   * The parameter type must be concrete (not `anytype`,
+///     `comptime`-only, or a generic) so the editor's wire-fit check
+///     has a fixed `From` to look up.
+///   * `impl`'s return type must not be `void` — coercions wrap edge
+///     expressions, so producing nothing is meaningless.
+pub fn CoercionReturn(comptime cfg: anytype) type {
+    const T = @TypeOf(cfg);
+    if (!@hasField(T, "impl")) {
+        @compileError("Coercion config is missing required field `.impl`");
+    }
+    const impl_ty = @TypeOf(cfg.impl);
+    const info = @typeInfo(impl_ty);
+    if (info != .@"fn") {
+        @compileError("Coercion `.impl` must be a function");
+    }
+    const fn_info = info.@"fn";
+    if (fn_info.params.len != 1) {
+        @compileError(
+            "Coercion `.impl` must take exactly one parameter (source value). " ++
+                "If your conversion needs game state, declare a FlowNode instead.",
+        );
+    }
+    const from_ty = fn_info.params[0].type orelse @compileError(
+        "Coercion `.impl` parameter must have a concrete type (no `anytype` / `comptime`)",
+    );
+    const to_ty = fn_info.return_type orelse @compileError(
+        "Coercion `.impl` return type must be concrete (no `anytype`)",
+    );
+    if (to_ty == void) {
+        @compileError("Coercion `.impl` must return a value (got `void`)");
+    }
+    return struct {
+        docs: ?[]const u8,
+
+        /// Source type — the type of the wire endpoint coming *into* the
+        /// coercion. Reflection consumers read this to match against a
+        /// candidate edge's producer-pin type.
+        pub const From = from_ty;
+
+        /// Destination type — the type the coercion produces. Matched
+        /// against the consumer-pin type.
+        pub const To = to_ty;
+
+        /// The author-supplied conversion function. Carried as a
+        /// comptime decl (not a runtime field) so its concrete signature
+        /// survives. Codegen calls this at the edge site as
+        /// `<plugin>__<name>.convert(<source_expr>)`.
+        pub const convert = cfg.impl;
+
+        /// Marker the assembler uses to recognize a coercion-valued
+        /// decl during the discovery walk. Cheaper than chasing
+        /// `@hasDecl(@This(), "convert")` + introspecting on every
+        /// public decl in a `Coercions` block.
+        pub const __is_labelle_coercion = true;
+    };
+}
+
+/// `Coercions` convention marker. Plugins / game modules declare:
+///
+///     pub const Coercions = struct {
+///         pub const body_to_entity = labelle.flow.Coercion(.{
+///             .impl = bodyToEntityImpl,
+///         });
+///     };
+///
+/// The assembler walks `@TypeOf(mod.Coercions)`'s decls at discovery
+/// time (phase 2). The struct itself has no required shape — every
+/// public decl whose value carries `__is_labelle_coercion = true` is
+/// folded into the emitted registry.
+pub const Coercions = struct {};
+
 /// Default `PinStyle`s the editor ships for primitives + `EntityId`.
 /// Plugin- and game-supplied `PinStyles` blocks layer on top (later
 /// declarations win for any duplicate type key).

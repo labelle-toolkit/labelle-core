@@ -55,7 +55,15 @@ pub fn HookDispatcher(
                 inline else => |data, tag| {
                     const name = @tagName(tag);
                     if (@hasDecl(Base, name)) {
-                        @field(Base, name)(self.receiver, data);
+                        // Discard any return value — the single-receiver
+                        // dispatcher has no "consumable" loop to break out
+                        // of, so a `bool` return on a notification handler
+                        // (or a future consumable handler installed here as
+                        // the sole listener) is dropped. The
+                        // multi-receiver `MergeHooks.emit` is the one that
+                        // honors the consumable flavor (RFC-PLUGIN-EVENTS
+                        // O4, phase 7).
+                        _ = @field(Base, name)(self.receiver, data);
                     }
                 },
             }
@@ -103,20 +111,64 @@ pub fn MergeHooks(
 
         const Self = @This();
 
+        /// Dispatch `payload` to every receiver that declares a handler for
+        /// the active variant.
+        ///
+        /// Two flavors, chosen at comptime per variant
+        /// (RFC-PLUGIN-EVENTS O4, phase 7):
+        ///
+        /// 1. **Notification (default).** The variant's payload struct has
+        ///    no `consumable` decl (or it is `false`). Every receiver with
+        ///    a matching declaration is invoked, regardless of return
+        ///    value. This is the historical shape — `void` handlers,
+        ///    unconditional fan-out, scanner-sort order
+        ///    (`labelle-assembler/src/main_zig.zig:2854-2870`).
+        ///
+        /// 2. **Consumable (opt-in).** The variant's payload struct
+        ///    declares `pub const consumable = true;` (RFC §1). Handlers
+        ///    return `bool`; the dispatcher breaks the loop the moment a
+        ///    handler returns `true`. The assembler emits the
+        ///    consumable-event handlers in priority-descending order
+        ///    (RFC O3 / phase 7), so the highest-priority consumer wins.
+        ///
+        /// The two paths coexist on a single `emit` entry — the flavor is
+        /// a property of the payload (RFC §1), not of the call site. A
+        /// receiver that returns `bool` from a notification handler is
+        /// accepted; the return value is discarded.
         pub fn emit(self: Self, payload: PayloadUnion) void {
             switch (payload) {
                 inline else => |data, tag| {
                     const name = @tagName(tag);
+                    const VariantType = @TypeOf(data);
+                    const variant_consumable = comptime isConsumable(VariantType);
                     inline for (0..ReceiverTypes.len) |i| {
                         const Base = UnwrapReceiver(ReceiverTypes[i]);
                         if (@hasDecl(Base, name)) {
-                            @field(Base, name)(self.receivers[i], data);
+                            if (variant_consumable) {
+                                const handled = @field(Base, name)(self.receivers[i], data);
+                                if (handled) break;
+                            } else {
+                                _ = @field(Base, name)(self.receivers[i], data);
+                            }
                         }
                     }
                 },
             }
         }
     };
+}
+
+/// True when `T` is a struct that declares `pub const consumable = true;`.
+/// The marker selects the return-aware dispatch path (RFC-PLUGIN-EVENTS O4,
+/// phase 7). Any other shape — no decl, a `false` decl, a non-struct payload
+/// — stays on the notification path.
+fn isConsumable(comptime T: type) bool {
+    const info = @typeInfo(T);
+    if (info != .@"struct") return false;
+    if (!@hasDecl(T, "consumable")) return false;
+    const decl_type = @TypeOf(@field(T, "consumable"));
+    if (decl_type != bool and decl_type != comptime_int) return false;
+    return @field(T, "consumable") == true;
 }
 
 fn ReceiverInstances(comptime Types: anytype) type {

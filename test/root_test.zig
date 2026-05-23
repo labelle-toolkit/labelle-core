@@ -111,6 +111,176 @@ test "MergeHooks: calls receivers in tuple order" {
     try testing.expectEqual('b', order[2]);
 }
 
+// RFC-PLUGIN-EVENTS O4, phase 7 — consumable event flavor.
+//
+// A consumable event's payload struct declares `pub const consumable = true;`
+// and its handlers return `bool`. `MergeHooks.emit` switches to the
+// return-aware path at comptime for variants whose payload is marked
+// consumable, and breaks out of the receiver loop the moment a handler
+// returns `true`. Notification events (no marker / `false` marker) keep the
+// pre-RFC fan-out semantics — every receiver runs regardless of return
+// value the handler may incidentally hand back.
+
+const ConsumablePayload = union(enum) {
+    /// Marked consumable: handlers return `bool`, dispatch breaks on `true`.
+    click: ClickEvent,
+    /// Plain notification — no marker, every listener runs unconditionally.
+    moved: MovedEvent,
+};
+
+const ClickEvent = struct {
+    x: f32,
+    y: f32,
+    pub const consumable = true;
+};
+
+const MovedEvent = struct {
+    dx: f32,
+    dy: f32,
+};
+
+test "MergeHooks: consumable event stops on first handler that returns true" {
+    var call_log: [4]u8 = .{ 0, 0, 0, 0 };
+    var idx: u8 = 0;
+    const idx_ptr = &idx;
+    const log_ptr = &call_log;
+
+    // The high-priority handler consumes the click. The assembler emits
+    // it ahead of the low-priority one (RFC O3 / phase 7 — priority-desc
+    // sort confined to consumable events); the test mimics that order
+    // explicitly so the dispatcher contract is what's under test.
+    const HighPriority = struct {
+        log: *[4]u8,
+        idx: *u8,
+        pub fn click(self: @This(), _: ClickEvent) bool {
+            self.log[self.idx.*] = 'H';
+            self.idx.* += 1;
+            return true; // consume — stops propagation
+        }
+    };
+
+    const LowPriority = struct {
+        log: *[4]u8,
+        idx: *u8,
+        pub fn click(self: @This(), _: ClickEvent) bool {
+            self.log[self.idx.*] = 'L';
+            self.idx.* += 1;
+            return false;
+        }
+    };
+
+    const Merged = MergeHooks(ConsumablePayload, .{ HighPriority, LowPriority });
+    const merged = Merged{ .receivers = .{
+        HighPriority{ .log = log_ptr, .idx = idx_ptr },
+        LowPriority{ .log = log_ptr, .idx = idx_ptr },
+    } };
+
+    merged.emit(.{ .click = .{ .x = 10, .y = 20 } });
+
+    // High-priority ran and consumed. Low-priority MUST NOT have been
+    // called — that's the consumable contract.
+    try testing.expectEqual(@as(u8, 1), idx);
+    try testing.expectEqual(@as(u8, 'H'), call_log[0]);
+    try testing.expectEqual(@as(u8, 0), call_log[1]);
+}
+
+test "MergeHooks: consumable event falls through when the first handler returns false" {
+    var call_log: [4]u8 = .{ 0, 0, 0, 0 };
+    var idx: u8 = 0;
+    const idx_ptr = &idx;
+    const log_ptr = &call_log;
+
+    const FirstDecliner = struct {
+        log: *[4]u8,
+        idx: *u8,
+        pub fn click(self: @This(), _: ClickEvent) bool {
+            self.log[self.idx.*] = 'F';
+            self.idx.* += 1;
+            return false; // not handled — propagate
+        }
+    };
+
+    const SecondConsumer = struct {
+        log: *[4]u8,
+        idx: *u8,
+        pub fn click(self: @This(), _: ClickEvent) bool {
+            self.log[self.idx.*] = 'S';
+            self.idx.* += 1;
+            return true; // consume here
+        }
+    };
+
+    const ThirdSkipped = struct {
+        log: *[4]u8,
+        idx: *u8,
+        pub fn click(self: @This(), _: ClickEvent) bool {
+            self.log[self.idx.*] = 'T';
+            self.idx.* += 1;
+            return false;
+        }
+    };
+
+    const Merged = MergeHooks(ConsumablePayload, .{ FirstDecliner, SecondConsumer, ThirdSkipped });
+    const merged = Merged{ .receivers = .{
+        FirstDecliner{ .log = log_ptr, .idx = idx_ptr },
+        SecondConsumer{ .log = log_ptr, .idx = idx_ptr },
+        ThirdSkipped{ .log = log_ptr, .idx = idx_ptr },
+    } };
+
+    merged.emit(.{ .click = .{ .x = 0, .y = 0 } });
+
+    // First and second ran; third was skipped because second consumed.
+    try testing.expectEqual(@as(u8, 2), idx);
+    try testing.expectEqual(@as(u8, 'F'), call_log[0]);
+    try testing.expectEqual(@as(u8, 'S'), call_log[1]);
+    try testing.expectEqual(@as(u8, 0), call_log[2]);
+}
+
+test "MergeHooks: notification event fans out to every listener regardless of returns" {
+    var call_count: u8 = 0;
+    const ptr = &call_count;
+
+    // Handlers that return `bool` for a NOTIFICATION event — the
+    // dispatcher must NOT honor `true` as "consumed" here. The break is
+    // gated on the variant's payload struct declaring `consumable`;
+    // `MovedEvent` does not, so all receivers run.
+    const ReceiverA = struct {
+        counter: *u8,
+        pub fn moved(self: @This(), _: MovedEvent) bool {
+            self.counter.* += 1;
+            return true; // intentional: must NOT short-circuit a notification.
+        }
+    };
+
+    const ReceiverB = struct {
+        counter: *u8,
+        pub fn moved(self: @This(), _: MovedEvent) void {
+            self.counter.* += 10;
+        }
+    };
+
+    const ReceiverC = struct {
+        counter: *u8,
+        pub fn moved(self: @This(), _: MovedEvent) bool {
+            self.counter.* += 100;
+            return false;
+        }
+    };
+
+    const Merged = MergeHooks(ConsumablePayload, .{ ReceiverA, ReceiverB, ReceiverC });
+    const merged = Merged{ .receivers = .{
+        ReceiverA{ .counter = ptr },
+        ReceiverB{ .counter = ptr },
+        ReceiverC{ .counter = ptr },
+    } };
+
+    merged.emit(.{ .moved = .{ .dx = 1, .dy = 2 } });
+
+    // All three ran: 1 + 10 + 100. The `true` return from A did NOT stop
+    // the loop because `MovedEvent` is not marked consumable.
+    try testing.expectEqual(@as(u8, 111), call_count);
+}
+
 const MergeHookPayloads = root.MergeHookPayloads;
 
 test "MergeHookPayloads: merges two unions into one" {

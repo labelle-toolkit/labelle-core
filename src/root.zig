@@ -13,6 +13,7 @@ pub const log = @import("log.zig");
 pub const typed_log = @import("typed_log.zig");
 pub const save_policy = @import("save_policy.zig");
 pub const serde = @import("serde.zig");
+pub const flow = @import("flow.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -82,6 +83,18 @@ pub const GamePosition = coordinates.GamePosition;
 pub const ScreenPosition = coordinates.ScreenPosition;
 pub const gameToScreen = coordinates.gameToScreen;
 pub const screenToGame = coordinates.screenToGame;
+
+// RFC-FLOW-VOCABULARY phase 1: comptime contracts for plugin-extensible
+// flow nodes. No discovery walk here — that lives in labelle-assembler.
+pub const FlowNode = flow.FlowNode;
+pub const FlowNodeReturn = flow.FlowNodeReturn;
+pub const FlowNodeKind = flow.FlowNodeKind;
+pub const PinSpec = flow.PinSpec;
+pub const PinStyle = flow.PinStyle;
+pub const PinStyles = flow.PinStyles;
+pub const Color = flow.Color;
+pub const EntityId = flow.EntityId;
+pub const default_pin_styles = flow.default_pin_styles;
 
 /// Standard engine lifecycle events — parameterized by Entity type.
 pub fn EngineHookPayload(comptime Entity: type) type {

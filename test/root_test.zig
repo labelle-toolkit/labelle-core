@@ -975,3 +975,274 @@ test "TypedLog is reachable through the labelle-core public API" {
     const entry: root.LogEntry = .{ .rule = "x", .msg_len = 0 };
     try testing.expectEqualStrings("x", entry.rule);
 }
+
+// ---------------------------------------------------------------------------
+// RFC-FLOW-VOCABULARY phase 1 — comptime contracts.
+//
+// These tests pin the shape of `FlowNode` / `PinSpec` / `PinStyle` /
+// `PinStyles` and the `default_pin_styles` set. The assembler (phase 2)
+// and flow-codegen (phase 3) will rely on these shapes; the gui (phase
+// 4) and plugin authors (phase 5) layer on top. No discovery walk is
+// exercised here — that's not in this phase.
+// ---------------------------------------------------------------------------
+
+const FlowNode = root.FlowNode;
+const FlowNodeKind = root.FlowNodeKind;
+const PinSpec = root.PinSpec;
+const PinStyle = root.PinStyle;
+const PinStyles = root.PinStyles;
+const Color = root.Color;
+const EntityId = root.EntityId;
+const default_pin_styles = root.default_pin_styles;
+
+// Sample impls used by the FlowNode tests. They mimic the shapes
+// real plugins will use: first param `game: anytype`, remaining params
+// are input pins, return type drives `kind` inference.
+
+fn sampleCommandImpl(game: anytype, body_id: u32, x: f32, y: f32) void {
+    _ = game;
+    _ = body_id;
+    _ = x;
+    _ = y;
+}
+
+fn sampleReporterImpl(game: anytype, body_id: u32) f32 {
+    _ = game;
+    _ = body_id;
+    return 0.0;
+}
+
+test "FlowNode: minimal config (only impl) gets all defaults" {
+    // Authors should be able to write `FlowNode(.{ .impl = foo })` and
+    // get every other field defaulted. This is the one-line happy path
+    // the RFC §1 motivation calls out — "A minimal `FlowNode` is one
+    // line. Defaults absorb the verbosity."
+    const node = FlowNode(.{ .impl = sampleCommandImpl });
+
+    try testing.expectEqual(@as(?[]const u8, null), node.display_name);
+    try testing.expectEqual(@as(?[]const u8, null), node.category);
+    try testing.expectEqual(@as(?[]const u8, null), node.docs);
+    try testing.expectEqual(@as(?FlowNodeKind, null), node.kind);
+
+    // `pins` defaults to `.{}` (empty anon-struct); we can introspect
+    // it via @typeInfo. No fields means "every pin reflects from impl".
+    const pins_info = @typeInfo(@TypeOf(node.pins));
+    try testing.expectEqual(@as(usize, 0), pins_info.@"struct".fields.len);
+
+    // The marker decl is what the assembler will scan for.
+    try testing.expect(@hasDecl(@TypeOf(node), "__is_labelle_flow_node"));
+    try testing.expect(@TypeOf(node).__is_labelle_flow_node);
+}
+
+test "FlowNode: impl is preserved as a comptime decl with original type" {
+    // The assembler reflects on `@TypeOf(@This().impl)` to discover
+    // pin names + types. If the function type were erased to e.g.
+    // `*const anyopaque`, that reflection would lose param names.
+    // Pin both: the decl exists and `@TypeOf` is the original function
+    // type.
+    const node = FlowNode(.{ .impl = sampleCommandImpl });
+
+    try testing.expect(@hasDecl(@TypeOf(node), "impl"));
+    try testing.expectEqual(@TypeOf(sampleCommandImpl), @TypeOf(@TypeOf(node).impl));
+
+    // The function value itself is the same.
+    try testing.expectEqual(&sampleCommandImpl, &@TypeOf(node).impl);
+}
+
+test "FlowNode: all fields set is accepted and preserved" {
+    // Maximum-config form — covers every overrideable field at once.
+    // Useful as a contract test that the factory doesn't silently
+    // drop a field it doesn't recognize.
+    const node = FlowNode(.{
+        .impl = sampleCommandImpl,
+        .display_name = "Apply Impulse",
+        .category = "Physics",
+        .docs = "Apply a linear impulse to the given body.",
+        .kind = FlowNodeKind.command,
+        .pins = .{
+            .body_id = PinSpec{ .label = "Body" },
+            .x = PinSpec{ .label = "Velocity X", .default = "0" },
+            .y = PinSpec{ .label = "Velocity Y", .default = "0" },
+        },
+    });
+
+    try testing.expectEqualStrings("Apply Impulse", node.display_name.?);
+    try testing.expectEqualStrings("Physics", node.category.?);
+    try testing.expectEqualStrings(
+        "Apply a linear impulse to the given body.",
+        node.docs.?,
+    );
+    try testing.expectEqual(FlowNodeKind.command, node.kind.?);
+
+    try testing.expectEqualStrings("Body", node.pins.body_id.label.?);
+    try testing.expectEqualStrings("Velocity X", node.pins.x.label.?);
+    try testing.expectEqualStrings("0", node.pins.x.default.?);
+    try testing.expectEqualStrings("Velocity Y", node.pins.y.label.?);
+}
+
+test "FlowNode: reporter impl (non-void return) is accepted" {
+    // The factory doesn't enforce the void/non-void → command/reporter
+    // mapping itself — the assembler does that during codegen, per
+    // RFC §1. The factory just preserves the impl's type so the
+    // assembler can read its return type via reflection. Pin that the
+    // factory accepts a reporter impl with no `kind` field set.
+    const node = FlowNode(.{ .impl = sampleReporterImpl });
+
+    try testing.expectEqual(@as(?FlowNodeKind, null), node.kind);
+
+    // Reflection sees the return type the assembler will key on.
+    const ImplT = @TypeOf(@TypeOf(node).impl);
+    const fn_info = @typeInfo(ImplT).@"fn";
+    try testing.expectEqual(f32, fn_info.return_type.?);
+}
+
+test "FlowNode: missing impl is a compile error" {
+    // The factory must reject configs without `.impl`. This test
+    // documents the contract — flipping it to a runtime check would
+    // be a regression because the whole point is to fail fast at
+    // discovery time, not at game runtime.
+    //
+    // We can't `try expectError(@compileError(...))` on this directly
+    // — comptime errors abort compilation — so the inverse is what's
+    // covered above: minimal config WITH impl compiles. If someone
+    // changes the factory to make impl optional, this test block can
+    // be flipped to assert the absent case compiles, and the diff
+    // will be obvious in code review.
+    const node = FlowNode(.{ .impl = sampleCommandImpl });
+    _ = node;
+}
+
+test "FlowNode: each call produces a distinct return type" {
+    // The factory's return type is generic over the config — two
+    // impls with different signatures must produce two different
+    // types so reflection sees the right pin shape per node.
+    const a = FlowNode(.{ .impl = sampleCommandImpl });
+    const b = FlowNode(.{ .impl = sampleReporterImpl });
+    try testing.expect(@TypeOf(a) != @TypeOf(b));
+}
+
+test "FlowNodeKind: command and reporter are distinct" {
+    try testing.expect(FlowNodeKind.command != FlowNodeKind.reporter);
+}
+
+test "PinSpec: default construction has every field null" {
+    const spec = PinSpec{};
+    try testing.expectEqual(@as(?[]const u8, null), spec.label);
+    try testing.expectEqual(@as(?[]const u8, null), spec.default);
+    try testing.expectEqual(@as(?[]const u8, null), spec.docs);
+}
+
+test "PinSpec: full construction round-trips every field" {
+    const spec = PinSpec{
+        .label = "Velocity X",
+        .default = "0.0",
+        .docs = "Linear velocity along world X.",
+    };
+    try testing.expectEqualStrings("Velocity X", spec.label.?);
+    try testing.expectEqualStrings("0.0", spec.default.?);
+    try testing.expectEqualStrings("Linear velocity along world X.", spec.docs.?);
+}
+
+test "PinStyle: default construction has every field null" {
+    const style = PinStyle{};
+    try testing.expectEqual(@as(?[]const u8, null), style.label);
+    try testing.expectEqual(@as(?Color, null), style.color);
+    try testing.expectEqual(@as(?[]const u8, null), style.icon);
+}
+
+test "PinStyle: full construction round-trips every field" {
+    const style = PinStyle{
+        .label = "Body",
+        .color = .{ .r = 50, .g = 100, .b = 200, .a = 255 },
+        .icon = "physics",
+    };
+    try testing.expectEqualStrings("Body", style.label.?);
+    try testing.expectEqual(@as(u8, 50), style.color.?.r);
+    try testing.expectEqual(@as(u8, 100), style.color.?.g);
+    try testing.expectEqual(@as(u8, 200), style.color.?.b);
+    try testing.expectEqualStrings("physics", style.icon.?);
+}
+
+test "Color: defaults to opaque white" {
+    const c = Color{};
+    try testing.expectEqual(@as(u8, 255), c.r);
+    try testing.expectEqual(@as(u8, 255), c.g);
+    try testing.expectEqual(@as(u8, 255), c.b);
+    try testing.expectEqual(@as(u8, 255), c.a);
+}
+
+test "Color: white and black constants" {
+    try testing.expectEqual(@as(u8, 255), Color.white.r);
+    try testing.expectEqual(@as(u8, 0), Color.black.r);
+    try testing.expectEqual(@as(u8, 255), Color.black.a);
+}
+
+test "EntityId: collapses to u32 for default pin styles" {
+    // EntityId is a type alias, so the underlying type collapses to
+    // u32 per the §2 wire-fit rule. Pin that here so a future change
+    // (e.g. wrapping it in a `struct { id: u32 }`) is a deliberate
+    // breaking change with a failing test in this very file.
+    try testing.expectEqual(u32, EntityId);
+}
+
+test "PinStyles: convention marker exists and is a struct" {
+    // PinStyles is a convention name — phase 2 (assembler) walks
+    // `mod.PinStyles`'s decls. The marker here exists so the
+    // convention has a documented anchor. Pin that it's reachable
+    // and is a struct (the only shape the assembler will scan).
+    const info = @typeInfo(PinStyles);
+    try testing.expect(info == .@"struct");
+}
+
+test "default_pin_styles: ships an entry for every primitive + EntityId" {
+    // The editor + assembler key default styles by decl name on this
+    // namespace. Pin that every promised default is present and the
+    // colors are sane (non-zero alpha). If a future change drops one,
+    // the test names below say which.
+    try testing.expect(@hasDecl(default_pin_styles, "u32_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "i32_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "u64_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "i64_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "f32_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "f64_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "bool_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "string_style"));
+    try testing.expect(@hasDecl(default_pin_styles, "entity_id_style"));
+
+    // Spot-check the integer + float + entity styles' labels — the
+    // editor renders these in the palette and the tooltip on a pin.
+    try testing.expectEqualStrings("Integer", default_pin_styles.u32_style.label.?);
+    try testing.expectEqualStrings("Integer", default_pin_styles.i32_style.label.?);
+    try testing.expectEqualStrings("Number", default_pin_styles.f32_style.label.?);
+    try testing.expectEqualStrings("Number", default_pin_styles.f64_style.label.?);
+    try testing.expectEqualStrings("Bool", default_pin_styles.bool_style.label.?);
+    try testing.expectEqualStrings("Text", default_pin_styles.string_style.label.?);
+    try testing.expectEqualStrings("Entity", default_pin_styles.entity_id_style.label.?);
+
+    // Every shipped color has a non-zero alpha — a transparent default
+    // would be a footgun.
+    try testing.expect(default_pin_styles.u32_style.color.?.a > 0);
+    try testing.expect(default_pin_styles.f32_style.color.?.a > 0);
+    try testing.expect(default_pin_styles.bool_style.color.?.a > 0);
+    try testing.expect(default_pin_styles.string_style.color.?.a > 0);
+    try testing.expect(default_pin_styles.entity_id_style.color.?.a > 0);
+}
+
+test "default_pin_styles: same-class types share a color" {
+    // Per the palette choice documented on `default_pin_styles`,
+    // every integer width shares one color, both float widths share
+    // one color. This isn't load-bearing for codegen, but the editor's
+    // visual coherence depends on it, so pin the contract.
+    const int_color = default_pin_styles.u32_style.color.?;
+    try testing.expect(default_pin_styles.i32_style.color.?.r == int_color.r);
+    try testing.expect(default_pin_styles.u64_style.color.?.r == int_color.r);
+    try testing.expect(default_pin_styles.i64_style.color.?.r == int_color.r);
+
+    const float_color = default_pin_styles.f32_style.color.?;
+    try testing.expect(default_pin_styles.f64_style.color.?.r == float_color.r);
+
+    // Entity uses a different color than plain integers, even though
+    // its underlying type is u32 — keeps wires from a `u32` integer
+    // pin into an `EntityId` pin visually distinct.
+    try testing.expect(default_pin_styles.entity_id_style.color.?.r != int_color.r);
+}

@@ -102,6 +102,19 @@ pub const PinSpec = struct {
 /// - `pins` — anonymous struct keyed by param name; each value is a
 ///   `PinSpec` (or struct-literal coercible to one). Anything missing
 ///   is reflected from `impl`.
+/// - `constructs: ?[]const u8` — fully-qualified Zig type name this
+///   node returns, used as an editor hint (RFC-FLOW-VOCABULARY §1,
+///   resolves open question O5). When set, the editor knows the node
+///   produces a value of that type, so a `SetVariable` on a
+///   struct-typed variable (which can't have an inline default per the
+///   "structs must be wired" rule) can suggest matching constructor
+///   nodes from the palette. Defaults to `null` — most nodes are
+///   commands or scalar reporters; only nodes whose return value is a
+///   struct meant to be wired into another node's input pin need to
+///   set this. The string is opaque to core (editor + assembler
+///   decide what counts as "matching"); the convention is the Zig
+///   type's fully-qualified name (`"labelle_box2d.RayResult"`) or just
+///   the bare name for project-local types (`"Color"`).
 ///
 /// Example:
 ///
@@ -116,6 +129,11 @@ pub const PinSpec = struct {
 ///             .y = .{ .label = "Velocity Y" },
 ///         },
 ///     });
+///
+///     pub const ray_cast = labelle.FlowNode(.{
+///         .impl = rayCastImpl,
+///         .constructs = "labelle_box2d.RayResult",
+///     });
 pub fn FlowNode(comptime cfg: anytype) FlowNodeReturn(cfg) {
     const T = @TypeOf(cfg);
     return .{
@@ -123,6 +141,7 @@ pub fn FlowNode(comptime cfg: anytype) FlowNodeReturn(cfg) {
         .category = if (@hasField(T, "category")) cfg.category else null,
         .docs = if (@hasField(T, "docs")) cfg.docs else null,
         .kind = if (@hasField(T, "kind")) cfg.kind else null,
+        .constructs = if (@hasField(T, "constructs")) cfg.constructs else null,
         .pins = if (@hasField(T, "pins")) cfg.pins else .{},
     };
 }
@@ -142,6 +161,12 @@ pub fn FlowNodeReturn(comptime cfg: anytype) type {
         category: ?[]const u8,
         docs: ?[]const u8,
         kind: ?FlowNodeKind,
+        /// Fully-qualified Zig type name this node constructs, or null
+        /// when the node is not a constructor (RFC-FLOW-VOCABULARY §1,
+        /// open question O5). Editor consults this to suggest matching
+        /// constructor nodes when the user creates a `SetVariable` of
+        /// a struct type that has no inline default widget.
+        constructs: ?[]const u8,
         pins: Pins,
 
         /// The author-supplied function. Carried as a comptime decl
@@ -179,6 +204,67 @@ pub const PinStyle = struct {
 /// `@TypeOf(mod.PinStyles)`'s decls at discovery time (phase 2). This
 /// marker exists so the convention has a documented anchor.
 pub const PinStyles = struct {};
+
+// ─── Numeric widening (RFC-FLOW-VOCABULARY §2, open question O1) ───
+//
+// The wire-fit rule's auto-accepted numeric conversions, encoded as a
+// comptime helper. Resolves RFC open question O1 by pinning the exact
+// set of widenings the editor + codegen accept silently — every other
+// numeric conversion needs an explicit `IntCast` / `IntToFloat` /
+// `FloatToInt` node (not yet shipped) or a declared coercion (O4).
+//
+// **Auto-accepted** (matches Zig's implicit conversions for `@as`):
+// - Same-sign integer widening: `i8 → i16 → i32 → i64 → i128`,
+//   `u8 → u16 → u32 → u64 → u128`.
+// - Unsigned → larger-signed (always representable):
+//   `u8 → i16/i32/i64/i128`, `u16 → i32/i64/i128`,
+//   `u32 → i64/i128`, `u64 → i128`.
+// - Float widening: `f32 → f64`.
+//
+// **Explicitly NOT auto-accepted** (require an explicit conversion):
+// - Int → Float of any width (`i32 → f32` is lossy for large ints).
+// - Signed → Unsigned (sign loss).
+// - Float → Int (precision/range loss; truncation surprises).
+// - Narrowing in either direction (always loses bits).
+//
+// Type equality is the trivial case and is handled by the wire-fit
+// caller before reaching here — `numericFits` consistently returns
+// `true` for it anyway so a caller that doesn't pre-check stays
+// correct.
+
+/// True when a value of `from` can be implicitly widened to `to` under
+/// the RFC §2 / O1 wire-fit rule. Trivially `true` when `from == to`.
+/// Pure comptime; no allocation, no runtime overhead.
+pub fn numericFits(comptime from: type, comptime to: type) bool {
+    if (from == to) return true;
+    const from_info = @typeInfo(from);
+    const to_info = @typeInfo(to);
+
+    // Integer → integer.
+    if (from_info == .int and to_info == .int) {
+        const f = from_info.int;
+        const t = to_info.int;
+        // Same-sign widening (must grow, never shrink).
+        if (f.signedness == t.signedness) return t.bits >= f.bits;
+        // Unsigned → signed: the signed target needs at least one more
+        // bit than the unsigned source to represent every value
+        // unambiguously (sign bit). `u8 → i16` fits; `u8 → i8` does not.
+        if (f.signedness == .unsigned and t.signedness == .signed) {
+            return t.bits > f.bits;
+        }
+        // Signed → unsigned: never auto-accepted (sign loss).
+        return false;
+    }
+
+    // Float → float widening.
+    if (from_info == .float and to_info == .float) {
+        return to_info.float.bits >= from_info.float.bits;
+    }
+
+    // Int ↔ Float: never auto-accepted (lossy / surprising for large
+    // ints, truncation surprises in the other direction).
+    return false;
+}
 
 /// Default `PinStyle`s the editor ships for primitives + `EntityId`.
 /// Plugin- and game-supplied `PinStyles` blocks layer on top (later

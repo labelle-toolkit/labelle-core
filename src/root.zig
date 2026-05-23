@@ -95,6 +95,7 @@ pub const PinStyles = flow.PinStyles;
 pub const Color = flow.Color;
 pub const EntityId = flow.EntityId;
 pub const default_pin_styles = flow.default_pin_styles;
+pub const numericFits = flow.numericFits;
 
 /// Standard engine lifecycle events — parameterized by Entity type.
 pub fn EngineHookPayload(comptime Entity: type) type {

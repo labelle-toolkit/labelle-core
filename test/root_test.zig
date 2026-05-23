@@ -1228,6 +1228,121 @@ test "default_pin_styles: ships an entry for every primitive + EntityId" {
     try testing.expect(default_pin_styles.entity_id_style.color.?.a > 0);
 }
 
+// ─── numericFits: RFC §2 / O1 wire-fit widening table ──────────────
+//
+// Pin the exact set of auto-accepted numeric conversions resolved by
+// the RFC's open question O1. Editor (labelle-gui/flow_node_catalog)
+// and codegen (flow-codegen) both consult this helper for primitive
+// pin compatibility; the tests here are the source of truth.
+
+const numericFits = root.numericFits;
+
+test "numericFits: equality always fits" {
+    try testing.expect(numericFits(i32, i32));
+    try testing.expect(numericFits(u32, u32));
+    try testing.expect(numericFits(f32, f32));
+    try testing.expect(numericFits(bool, bool));
+}
+
+test "numericFits: same-sign integer widening accepted" {
+    try testing.expect(numericFits(i8, i16));
+    try testing.expect(numericFits(i8, i32));
+    try testing.expect(numericFits(i16, i32));
+    try testing.expect(numericFits(i32, i64));
+    try testing.expect(numericFits(i64, i128));
+
+    try testing.expect(numericFits(u8, u16));
+    try testing.expect(numericFits(u8, u32));
+    try testing.expect(numericFits(u16, u32));
+    try testing.expect(numericFits(u32, u64));
+    try testing.expect(numericFits(u64, u128));
+}
+
+test "numericFits: integer narrowing refused" {
+    try testing.expect(!numericFits(i32, i16));
+    try testing.expect(!numericFits(i64, i32));
+    try testing.expect(!numericFits(u32, u16));
+    try testing.expect(!numericFits(u64, u32));
+}
+
+test "numericFits: unsigned to larger signed accepted, equal-or-smaller signed refused" {
+    // Unsigned → strictly-larger signed: every value representable.
+    try testing.expect(numericFits(u8, i16));
+    try testing.expect(numericFits(u8, i32));
+    try testing.expect(numericFits(u16, i32));
+    try testing.expect(numericFits(u16, i64));
+    try testing.expect(numericFits(u32, i64));
+    try testing.expect(numericFits(u32, i128));
+    try testing.expect(numericFits(u64, i128));
+
+    // Unsigned → equal-or-smaller signed: would lose the high bit.
+    try testing.expect(!numericFits(u8, i8));
+    try testing.expect(!numericFits(u16, i16));
+    try testing.expect(!numericFits(u32, i32));
+    try testing.expect(!numericFits(u64, i64));
+    try testing.expect(!numericFits(u32, i16));
+}
+
+test "numericFits: signed to unsigned refused (sign loss)" {
+    try testing.expect(!numericFits(i8, u8));
+    try testing.expect(!numericFits(i8, u16));
+    try testing.expect(!numericFits(i32, u32));
+    try testing.expect(!numericFits(i32, u64));
+    try testing.expect(!numericFits(i64, u64));
+}
+
+test "numericFits: float widening accepted, narrowing refused" {
+    try testing.expect(numericFits(f32, f64));
+    try testing.expect(!numericFits(f64, f32));
+}
+
+test "numericFits: int <-> float refused (lossy / surprising)" {
+    // Int → float: lossy for large ints (f32 only has 24 bits of
+    // mantissa, f64 only 53).
+    try testing.expect(!numericFits(i32, f32));
+    try testing.expect(!numericFits(i32, f64));
+    try testing.expect(!numericFits(i64, f64));
+    try testing.expect(!numericFits(u32, f32));
+    try testing.expect(!numericFits(u32, f64));
+    try testing.expect(!numericFits(u64, f64));
+
+    // Float → int: truncation surprises.
+    try testing.expect(!numericFits(f32, i32));
+    try testing.expect(!numericFits(f64, i64));
+    try testing.expect(!numericFits(f32, u32));
+}
+
+test "numericFits: aliases collapse via Zig type equality" {
+    // `EntityId` is `u32` — same underlying type, so it fits both ways
+    // trivially. The wire-fit caller relies on this: it doesn't have a
+    // separate "alias" branch.
+    try testing.expect(numericFits(EntityId, u32));
+    try testing.expect(numericFits(u32, EntityId));
+    try testing.expect(numericFits(EntityId, EntityId));
+    // EntityId widens to u64 the same way u32 does.
+    try testing.expect(numericFits(EntityId, u64));
+    // EntityId → i32: same as u32 → i32, sign-bit collision → refused.
+    try testing.expect(!numericFits(EntityId, i32));
+    // EntityId → i64: same as u32 → i64, widens cleanly.
+    try testing.expect(numericFits(EntityId, i64));
+}
+
+test "FlowNode: constructs defaults to null when omitted" {
+    const node = FlowNode(.{ .impl = sampleCommandImpl });
+    try testing.expectEqual(@as(?[]const u8, null), node.constructs);
+}
+
+test "FlowNode: constructs is preserved when set" {
+    // RFC-FLOW-VOCABULARY §1, open question O5 — the editor needs a way
+    // to know which nodes return a value of a given Zig type so it can
+    // suggest constructor nodes for struct-typed variables.
+    const node = FlowNode(.{
+        .impl = sampleReporterImpl,
+        .constructs = "labelle_box2d.RayResult",
+    });
+    try testing.expectEqualStrings("labelle_box2d.RayResult", node.constructs.?);
+}
+
 test "default_pin_styles: same-class types share a color" {
     // Per the palette choice documented on `default_pin_styles`,
     // every integer width shares one color, both float widths share

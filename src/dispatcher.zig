@@ -136,6 +136,15 @@ pub fn MergeHooks(
         /// receiver that returns `bool` from a notification handler is
         /// accepted; the return value is discarded.
         pub fn emit(self: Self, payload: PayloadUnion) void {
+            // Comptime branch budget for the `switch (payload) { inline else }`
+            // over PayloadUnion × the `inline for` over ReceiverTypes. Per
+            // iteration cost is small (`@hasDecl`, `@field`, `UnwrapReceiver`)
+            // but the product climbs fast — flying-platform-labelle (11
+            // receivers × ~30 variants ≈ 330 iterations + per-iteration
+            // comptime probes) trips Zig's default 1000-branch wall.
+            // 100k is comfortable headroom for any realistic project; pure
+            // comptime, no runtime cost.
+            @setEvalBranchQuota(100000);
             switch (payload) {
                 inline else => |data, tag| {
                     const name = @tagName(tag);

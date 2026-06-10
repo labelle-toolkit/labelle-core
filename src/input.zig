@@ -1,3 +1,13 @@
+const gamepad = @import("gamepad.zig");
+
+/// Cross-backend gamepad event/diagnostic value types. Re-exported here so
+/// callers can reach them via `input.GamepadEvent` etc.
+pub const GamepadEvent = gamepad.GamepadEvent;
+pub const GamepadDescription = gamepad.GamepadDescription;
+pub const GamepadSourceClass = gamepad.SourceClass;
+pub const GamepadTypeHint = gamepad.TypeHint;
+pub const GamepadUnavailableReason = gamepad.UnavailableReason;
+
 /// Comptime-validated input interface.
 /// The assembler provides the concrete Impl (raylib, sokol, etc.).
 /// Both engine and plugins use this for zero-cost dispatch.
@@ -86,23 +96,50 @@ pub fn InputInterface(comptime Impl: type) type {
 
         // ── Gamepad ───────────────────────────────────────────────
 
-        pub inline fn isGamepadAvailable(gamepad: u32) bool {
-            if (@hasDecl(Impl, "isGamepadAvailable")) return Impl.isGamepadAvailable(gamepad);
+        pub inline fn isGamepadAvailable(gamepad_id: u32) bool {
+            if (@hasDecl(Impl, "isGamepadAvailable")) return Impl.isGamepadAvailable(gamepad_id);
             return false;
         }
 
-        pub inline fn isGamepadButtonDown(gamepad: u32, button: u32) bool {
-            if (@hasDecl(Impl, "isGamepadButtonDown")) return Impl.isGamepadButtonDown(gamepad, button);
+        pub inline fn isGamepadButtonDown(gamepad_id: u32, button: u32) bool {
+            if (@hasDecl(Impl, "isGamepadButtonDown")) return Impl.isGamepadButtonDown(gamepad_id, button);
             return false;
         }
 
-        pub inline fn isGamepadButtonPressed(gamepad: u32, button: u32) bool {
-            if (@hasDecl(Impl, "isGamepadButtonPressed")) return Impl.isGamepadButtonPressed(gamepad, button);
+        pub inline fn isGamepadButtonPressed(gamepad_id: u32, button: u32) bool {
+            if (@hasDecl(Impl, "isGamepadButtonPressed")) return Impl.isGamepadButtonPressed(gamepad_id, button);
             return false;
         }
 
-        pub inline fn getGamepadAxisValue(gamepad: u32, axis: u32) f32 {
-            if (@hasDecl(Impl, "getGamepadAxisValue")) return Impl.getGamepadAxisValue(gamepad, axis);
+        pub inline fn getGamepadAxisValue(gamepad_id: u32, axis: u32) f32 {
+            if (@hasDecl(Impl, "getGamepadAxisValue")) return Impl.getGamepadAxisValue(gamepad_id, axis);
+            return 0;
+        }
+
+        // ── Gamepad hotplug events (Phase 0 contract, core#18) ───────
+        //
+        // Backends declare these to source connect/disconnect events and a
+        // diagnostic device list. Both are COPY-only (see gamepad.zig). When
+        // a backend declares neither, the fallbacks return 0 — preserving
+        // today's "nothing happens" behavior. The engine's own fallback may
+        // instead route to `gamepad_source` (the per-OS skeleton) when a
+        // backend has no `pollGamepadEvents`.
+
+        /// Drain pending hotplug (connect/disconnect) events into `out`.
+        /// Returns the number of events written (never more than `out.len`).
+        /// A backend Impl declares: `pub fn pollGamepadEvents(out: []GamepadEvent) usize`.
+        pub inline fn pollGamepadEvents(out: []GamepadEvent) usize {
+            if (@hasDecl(Impl, "pollGamepadEvents")) return Impl.pollGamepadEvents(out);
+            return 0;
+        }
+
+        /// Enumerate currently-visible devices for diagnostics/logging,
+        /// including an `unavailable_reason` for devices that are detected
+        /// but cannot be opened (e.g. Linux permission denied).
+        /// Returns the number of descriptions written (never more than `out.len`).
+        /// A backend Impl declares: `pub fn describeGamepads(out: []GamepadDescription) usize`.
+        pub inline fn describeGamepads(out: []GamepadDescription) usize {
+            if (@hasDecl(Impl, "describeGamepads")) return Impl.describeGamepads(out);
             return 0;
         }
 

@@ -14,6 +14,8 @@ pub const typed_log = @import("typed_log.zig");
 pub const save_policy = @import("save_policy.zig");
 pub const serde = @import("serde.zig");
 pub const flow = @import("flow.zig");
+pub const gamepad = @import("gamepad.zig");
+pub const gamepad_source = @import("gamepad_source/root.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -32,6 +34,14 @@ pub const StubAudio = audio.StubAudio;
 
 pub const InputInterface = input.InputInterface;
 pub const StubInput = input.StubInput;
+
+// Gamepad event contract (core#18) — COPY-only value types crossing the
+// hotplug ring buffer, plus the per-OS source skeleton.
+pub const GamepadEvent = gamepad.GamepadEvent;
+pub const GamepadDescription = gamepad.GamepadDescription;
+pub const GamepadSourceClass = gamepad.SourceClass;
+pub const GamepadTypeHint = gamepad.TypeHint;
+pub const GamepadUnavailableReason = gamepad.UnavailableReason;
 
 pub const GuiInterface = gui.GuiInterface;
 pub const StubGui = gui.StubGui;

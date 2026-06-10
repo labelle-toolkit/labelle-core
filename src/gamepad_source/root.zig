@@ -37,6 +37,11 @@ const builtin = @import("builtin");
 const gamepad = @import("../gamepad.zig");
 pub const GamepadEvent = gamepad.GamepadEvent;
 pub const GamepadDescription = gamepad.GamepadDescription;
+// Re-exported so per-OS source files (e.g. `android.zig`, which classifies a
+// device's `InputDevice.getSources()` bitmask into a `.gamepad` / `.dpad_remote`
+// class) can name the event field type through `@import("root.zig")` without
+// reaching back into `../gamepad.zig`.
+pub const SourceClass = gamepad.SourceClass;
 
 /// Comptime OS/abi dispatch. Each branch maps to exactly one owned file so
 /// parallel Wave-1 work never collides. Android is detected via abi (there

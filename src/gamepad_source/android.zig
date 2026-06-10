@@ -103,19 +103,31 @@ const EventRing = struct {
     buf: [RING_CAPACITY]GamepadEvent = undefined,
     head: usize = 0,
     len: usize = 0,
-    mutex: std.Thread.Mutex = .{},
+    // `std.Thread.Mutex` was removed in Zig 0.16 and `std.Io.Mutex`'s
+    // lock/unlock require an `Io` handle, which this hotplug ring doesn't
+    // carry (its `push` runs deep in a JNI Looper callback). `std.atomic.Mutex`
+    // is the right fit: a tiny spin lock for a low-contention, hotplug-rate
+    // critical section — same primitive the engine's `io_helper.zig` uses for
+    // its Io-free lazy-init guard. Acquire by spinning on `tryLock`.
+    mutex: std.atomic.Mutex = .unlocked,
+
+    /// Spin until the ring lock is acquired. Contention is hotplug-rate, so
+    /// the spin never meaningfully busy-waits.
+    fn lock(self: *EventRing) void {
+        while (!self.mutex.tryLock()) {}
+    }
 
     /// Drop all queued events. Used on deinit so a later re-init can't observe
     /// hotplug deltas that were queued before/during teardown.
     fn clear(self: *EventRing) void {
-        self.mutex.lock();
+        self.lock();
         defer self.mutex.unlock();
         self.head = 0;
         self.len = 0;
     }
 
     fn push(self: *EventRing, ev: GamepadEvent) void {
-        self.mutex.lock();
+        self.lock();
         defer self.mutex.unlock();
         if (self.len == RING_CAPACITY) {
             // Drop oldest to make room (overwrite-on-full).
@@ -129,7 +141,7 @@ const EventRing = struct {
 
     /// Drain up to `out.len` events FIFO; returns the count written.
     fn drain(self: *EventRing, out: []GamepadEvent) usize {
-        self.mutex.lock();
+        self.lock();
         defer self.mutex.unlock();
         const n = @min(out.len, self.len);
         for (0..n) |i| {

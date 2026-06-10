@@ -24,11 +24,20 @@
 //! // on 'gamepadconnected':
 //! const id = enc.encode(e.gamepad.id);
 //! const ptr = inst.exports.labelle_gamepad_name_buffer();
-//! new Uint8Array(memory.buffer, ptr, id.length).set(id);
-//! inst.exports.labelle_gamepad_connected(e.gamepad.index, id.length);
+//! // The staging buffer is exactly NAME_CAPACITY (63) bytes — the JS side
+//! // MUST clamp the write or it corrupts the wasm heap. Browser gamepad ids
+//! // (Sony/Nintendo especially) routinely exceed 63 bytes.
+//! const len = Math.min(id.length, 63);
+//! new Uint8Array(memory.buffer, ptr, len).set(id.subarray(0, len));
+//! inst.exports.labelle_gamepad_connected(e.gamepad.index, len);
 //! // on 'gamepaddisconnected':
 //! inst.exports.labelle_gamepad_disconnected(e.gamepad.index);
 //! ```
+//!
+//! `labelle_gamepad_connected` also clamps `name_len` to `NAME_CAPACITY`
+//! defensively, so a non-conforming shim can't read past the staging buffer —
+//! but it cannot undo an over-long JS *write*, hence the clamp above is the
+//! authoritative safety boundary.
 //!
 //! Keeping wasm as the callee (exports) avoids needing an `extern` JS import
 //! at instantiation time, which would force every host to provide the symbol
@@ -138,6 +147,14 @@ const WasmSource = struct {
         }
         return null;
     }
+
+    /// Reset all module state. Test-only (the live module never re-inits).
+    fn resetForTest() void {
+        ring_head = 0;
+        ring_tail = 0;
+        ring_count = 0;
+        for (&tracked) |*t| t.* = .{};
+    }
 };
 
 // ── wasm exports the JS shim calls ─────────────────────────────────────
@@ -165,7 +182,12 @@ fn labelle_gamepad_connected(index: u32, name_len: u32) callconv(.c) void {
     const n = @min(@as(usize, name_len), gamepad.NAME_CAPACITY);
     const name = WasmSource.name_buf[0..n];
 
-    const idx = WasmSource.findBySlot(index) orelse WasmSource.allocSlot() orelse return;
+    // A second `gamepadconnected` for an already-tracked index (no intervening
+    // disconnect) is idempotent: the slot is already live, so don't emit a
+    // duplicate `.connected`. The browser occasionally re-fires the event.
+    if (WasmSource.findBySlot(index) != null) return;
+
+    const idx = WasmSource.allocSlot() orelse return;
     const t = &WasmSource.tracked[idx];
     t.* = .{};
     t.in_use = true;
@@ -188,15 +210,21 @@ fn labelle_gamepad_connected(index: u32, name_len: u32) callconv(.c) void {
     WasmSource.pushEvent(ev);
 }
 
-/// JS `gamepaddisconnected` handler entry point.
+/// JS `gamepaddisconnected` handler entry point. Only emits a `.disconnected`
+/// for a slot we actually tracked — a disconnect for an untracked index (e.g.
+/// the connect was dropped because the table was full) is ignored, mirroring
+/// `linux.zig`'s `onDisconnect`.
 fn labelle_gamepad_disconnected(index: u32) callconv(.c) void {
-    var ev = GamepadEvent{ .kind = .disconnected, .slot = index, .source_class = .gamepad };
-    if (WasmSource.findBySlot(index)) |idx| {
-        const t = &WasmSource.tracked[idx];
-        ev.guid = t.guid;
-        ev.setName(t.name[0..t.name_len]);
-        t.* = .{};
-    }
+    const idx = WasmSource.findBySlot(index) orelse return;
+    const t = &WasmSource.tracked[idx];
+    var ev = GamepadEvent{
+        .kind = .disconnected,
+        .slot = index,
+        .guid = t.guid,
+        .source_class = .gamepad,
+    };
+    ev.setName(t.name[0..t.name_len]);
+    t.* = .{};
     WasmSource.pushEvent(ev);
 }
 
@@ -263,4 +291,49 @@ test "typeHintFromId classifies common vendor strings" {
     try std.testing.expectEqual(gamepad.TypeHint.nintendo, typeHintFromId("Pro Controller (Vendor: 057e)"));
     try std.testing.expectEqual(gamepad.TypeHint.generic, typeHintFromId("Generic USB Joystick"));
     try std.testing.expectEqual(gamepad.TypeHint.unknown, typeHintFromId(""));
+}
+
+fn stageName(text: []const u8) u32 {
+    const n = @min(text.len, gamepad.NAME_CAPACITY);
+    @memcpy(WasmSource.name_buf[0..n], text[0..n]);
+    return @intCast(n);
+}
+
+test "duplicate connect for same slot is idempotent (no second event)" {
+    WasmSource.resetForTest();
+    const len = stageName("Xbox Wireless Controller");
+    labelle_gamepad_connected(0, len);
+    labelle_gamepad_connected(0, len); // re-fire, no intervening disconnect
+
+    var buf: [8]GamepadEvent = undefined;
+    const got = WasmSource.pollEvents(&buf);
+    try std.testing.expectEqual(@as(usize, 1), got);
+    try std.testing.expectEqual(GamepadEvent.Kind.connected, buf[0].kind);
+
+    var dbuf: [8]GamepadDescription = undefined;
+    try std.testing.expectEqual(@as(usize, 1), WasmSource.describe(&dbuf));
+}
+
+test "disconnect for untracked slot emits nothing" {
+    WasmSource.resetForTest();
+    labelle_gamepad_disconnected(3); // never connected
+    var buf: [8]GamepadEvent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), WasmSource.pollEvents(&buf));
+}
+
+test "connect then disconnect emits exactly one of each and frees the slot" {
+    WasmSource.resetForTest();
+    const len = stageName("DualSense Wireless Controller");
+    labelle_gamepad_connected(2, len);
+    labelle_gamepad_disconnected(2);
+
+    var buf: [8]GamepadEvent = undefined;
+    const got = WasmSource.pollEvents(&buf);
+    try std.testing.expectEqual(@as(usize, 2), got);
+    try std.testing.expectEqual(GamepadEvent.Kind.connected, buf[0].kind);
+    try std.testing.expectEqual(GamepadEvent.Kind.disconnected, buf[1].kind);
+    try std.testing.expectEqual(@as(u32, 2), buf[1].slot);
+
+    var dbuf: [8]GamepadDescription = undefined;
+    try std.testing.expectEqual(@as(usize, 0), WasmSource.describe(&dbuf));
 }

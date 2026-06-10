@@ -16,9 +16,11 @@
 //! * **Node de-duplication.** A single physical pad shows up as *both* a
 //!   legacy `js*` joydev node and one or more `event*` evdev nodes. We only
 //!   ever track `event*` nodes (evdev is the modern API and the one #250 will
-//!   read state from), and within those we keep just the first event node of a
-//!   given device (udev's `ID_INPUT_JOYSTICK` + the kernel `input%d` parent
-//!   group them). `js*` nodes are dropped outright.
+//!   read state from); `js*` nodes are dropped outright. Within the `event*`
+//!   nodes a single physical pad can still expose several joystick-class nodes
+//!   (e.g. a motion-control endpoint alongside the buttons endpoint), so we
+//!   also de-dup by the device identity GUID: the first usable `event*` node of
+//!   a given GUID wins and later ones for the same GUID are dropped.
 //! * **Gamepad filtering.** Only nodes whose udev properties mark them as a
 //!   joystick/gamepad (`ID_INPUT_JOYSTICK=1`) are surfaced. Keyboards, mice,
 //!   touchpads, power-button "devices", etc. are ignored. `source_class` is
@@ -36,6 +38,14 @@
 //!   device (udev tells us it exists and its identity from properties), but we
 //!   record it so `describe()` reports `unavailable_reason == .permission_denied`
 //!   and we log a one-time hint pointing at the input group / udev rule.
+//!
+//! libudev is loaded at runtime via `std.DynLib` (dlopen of `libudev.so.1`)
+//! rather than link-time `extern "udev"`. A link-time dependency forces every
+//! consumer — including the plain `zig build test` artifact, which links no
+//! `-ludev` and isn't built `-fPIC` — to satisfy the symbol, and the contract
+//! test force-references this file on a native-Linux host. dlopen keeps the
+//! module link-clean everywhere while still using libudev when present at
+//! runtime; if the library is absent, hotplug is cleanly disabled.
 //!
 //! On-Linux runtime behavior cannot be exercised on the macOS dev host; the
 //! file is written to cross-compile for `*-linux` and is covered by a real
@@ -75,44 +85,75 @@ const FallbackSource = struct {
 };
 
 // ── libudev / evdev FFI ────────────────────────────────────────────────
-// Minimal hand-written bindings. We avoid `@cImport` so the file parses and
-// cross-compiles without libudev headers present on the (macOS) build host;
-// the symbols are only *referenced* from code reachable on a linux target,
-// and the assembler links `-ludev` for the sokol linux build.
+// Minimal hand-written bindings, loaded at RUNTIME via `std.DynLib`
+// (dlopen) rather than declared as `extern "udev"`. A link-time
+// `extern "udev"` forces a hard dynamic-library dependency that the plain
+// `zig build test` artifact can't satisfy (no `-ludev`, no `-fPIC`), and the
+// contract test in `root.zig` force-references `LinuxSource.init()` on a
+// native-Linux host — so the test build failed to link. dlopen keeps this
+// file link-clean on every build (test, cross-compile, sokol) while still
+// using libudev at runtime when it's present. We avoid `@cImport` so the file
+// also parses without libudev headers on the (macOS) build host.
 
-const c = if (is_linux) struct {
+const c = struct {
     pub const udev = opaque {};
     pub const udev_enumerate = opaque {};
     pub const udev_list_entry = opaque {};
     pub const udev_device = opaque {};
     pub const udev_monitor = opaque {};
+};
 
-    pub extern "udev" fn udev_new() ?*udev;
-    pub extern "udev" fn udev_unref(*udev) ?*udev;
+/// Function-pointer table for the libudev symbols we use, populated by
+/// `dlopen`+`dlsym` at `init()`. Kept as `?fn` pointers so a missing symbol
+/// (or a missing library) cleanly disables the source instead of failing to
+/// link. Only referenced from Linux-target code paths.
+const Udev = struct {
+    handle: std.DynLib,
 
-    pub extern "udev" fn udev_enumerate_new(*udev) ?*udev_enumerate;
-    pub extern "udev" fn udev_enumerate_add_match_subsystem(*udev_enumerate, [*:0]const u8) c_int;
-    pub extern "udev" fn udev_enumerate_scan_devices(*udev_enumerate) c_int;
-    pub extern "udev" fn udev_enumerate_get_list_entry(*udev_enumerate) ?*udev_list_entry;
-    pub extern "udev" fn udev_enumerate_unref(*udev_enumerate) ?*udev_enumerate;
+    udev_new: *const fn () callconv(.c) ?*c.udev,
+    udev_unref: *const fn (*c.udev) callconv(.c) ?*c.udev,
 
-    pub extern "udev" fn udev_list_entry_get_next(*udev_list_entry) ?*udev_list_entry;
-    pub extern "udev" fn udev_list_entry_get_name(*udev_list_entry) ?[*:0]const u8;
+    udev_enumerate_new: *const fn (*c.udev) callconv(.c) ?*c.udev_enumerate,
+    udev_enumerate_add_match_subsystem: *const fn (*c.udev_enumerate, [*:0]const u8) callconv(.c) c_int,
+    udev_enumerate_scan_devices: *const fn (*c.udev_enumerate) callconv(.c) c_int,
+    udev_enumerate_get_list_entry: *const fn (*c.udev_enumerate) callconv(.c) ?*c.udev_list_entry,
+    udev_enumerate_unref: *const fn (*c.udev_enumerate) callconv(.c) ?*c.udev_enumerate,
 
-    pub extern "udev" fn udev_device_new_from_syspath(*udev, [*:0]const u8) ?*udev_device;
-    pub extern "udev" fn udev_device_get_devnode(*udev_device) ?[*:0]const u8;
-    pub extern "udev" fn udev_device_get_property_value(*udev_device, [*:0]const u8) ?[*:0]const u8;
-    pub extern "udev" fn udev_device_get_action(*udev_device) ?[*:0]const u8;
-    pub extern "udev" fn udev_device_get_sysname(*udev_device) ?[*:0]const u8;
-    pub extern "udev" fn udev_device_unref(*udev_device) ?*udev_device;
+    udev_list_entry_get_next: *const fn (*c.udev_list_entry) callconv(.c) ?*c.udev_list_entry,
+    udev_list_entry_get_name: *const fn (*c.udev_list_entry) callconv(.c) ?[*:0]const u8,
 
-    pub extern "udev" fn udev_monitor_new_from_netlink(*udev, [*:0]const u8) ?*udev_monitor;
-    pub extern "udev" fn udev_monitor_filter_add_match_subsystem_devtype(*udev_monitor, [*:0]const u8, ?[*:0]const u8) c_int;
-    pub extern "udev" fn udev_monitor_enable_receiving(*udev_monitor) c_int;
-    pub extern "udev" fn udev_monitor_get_fd(*udev_monitor) c_int;
-    pub extern "udev" fn udev_monitor_receive_device(*udev_monitor) ?*udev_device;
-    pub extern "udev" fn udev_monitor_unref(*udev_monitor) ?*udev_monitor;
-} else struct {};
+    udev_device_new_from_syspath: *const fn (*c.udev, [*:0]const u8) callconv(.c) ?*c.udev_device,
+    udev_device_get_devnode: *const fn (*c.udev_device) callconv(.c) ?[*:0]const u8,
+    udev_device_get_property_value: *const fn (*c.udev_device, [*:0]const u8) callconv(.c) ?[*:0]const u8,
+    udev_device_get_action: *const fn (*c.udev_device) callconv(.c) ?[*:0]const u8,
+    udev_device_get_sysname: *const fn (*c.udev_device) callconv(.c) ?[*:0]const u8,
+    udev_device_unref: *const fn (*c.udev_device) callconv(.c) ?*c.udev_device,
+
+    udev_monitor_new_from_netlink: *const fn (*c.udev, [*:0]const u8) callconv(.c) ?*c.udev_monitor,
+    udev_monitor_filter_add_match_subsystem_devtype: *const fn (*c.udev_monitor, [*:0]const u8, ?[*:0]const u8) callconv(.c) c_int,
+    udev_monitor_enable_receiving: *const fn (*c.udev_monitor) callconv(.c) c_int,
+    udev_monitor_get_fd: *const fn (*c.udev_monitor) callconv(.c) c_int,
+    udev_monitor_receive_device: *const fn (*c.udev_monitor) callconv(.c) ?*c.udev_device,
+    udev_monitor_unref: *const fn (*c.udev_monitor) callconv(.c) ?*c.udev_monitor,
+
+    /// dlopen libudev and resolve every symbol. Returns null when the library
+    /// is absent or any symbol is missing (older/stripped builds).
+    fn load() ?Udev {
+        // libudev.so.1 is the stable runtime SONAME; the unversioned
+        // libudev.so only ships with -dev packages.
+        var handle = std.DynLib.open("libudev.so.1") catch
+            std.DynLib.open("libudev.so") catch return null;
+        errdefer handle.close();
+
+        var u: Udev = undefined;
+        u.handle = handle;
+        inline for (@typeInfo(Udev).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "handle")) continue;
+            @field(u, f.name) = handle.lookup(f.type, f.name) orelse return null;
+        }
+        return u;
+    }
+};
 
 /// Linux `struct input_id` (linux/input.h). Returned by `EVIOCGID`.
 const input_id = extern struct {
@@ -160,6 +201,8 @@ const Tracked = struct {
 };
 
 const LinuxSource = struct {
+    /// Runtime-resolved libudev entry points (null when libudev is absent).
+    var udev_api: ?Udev = null;
     var udev_ctx: ?*c.udev = null;
     var monitor: ?*c.udev_monitor = null;
     var monitor_fd: c_int = -1;
@@ -180,8 +223,16 @@ const LinuxSource = struct {
         if (initialized) return;
         initialized = true;
 
-        const ctx = c.udev_new() orelse {
+        const u = Udev.load() orelse {
+            std.log.scoped(.gamepad).warn("libudev not available; Linux gamepad hotplug disabled", .{});
+            return;
+        };
+        udev_api = u;
+
+        const ctx = u.udev_new() orelse {
             std.log.scoped(.gamepad).warn("udev_new() failed; Linux gamepad hotplug disabled", .{});
+            udev_api.?.handle.close();
+            udev_api = null;
             return;
         };
         udev_ctx = ctx;
@@ -191,14 +242,18 @@ const LinuxSource = struct {
     }
 
     pub fn deinit() void {
-        if (monitor) |m| {
-            _ = c.udev_monitor_unref(m);
-            monitor = null;
-            monitor_fd = -1;
-        }
-        if (udev_ctx) |ctx| {
-            _ = c.udev_unref(ctx);
-            udev_ctx = null;
+        if (udev_api) |*u| {
+            if (monitor) |m| {
+                _ = u.udev_monitor_unref(m);
+                monitor = null;
+                monitor_fd = -1;
+            }
+            if (udev_ctx) |ctx| {
+                _ = u.udev_unref(ctx);
+                udev_ctx = null;
+            }
+            u.handle.close();
+            udev_api = null;
         }
         ring_head = 0;
         ring_tail = 0;
@@ -251,27 +306,29 @@ const LinuxSource = struct {
     // ── internals ──────────────────────────────────────────────────────
 
     fn armMonitor(ctx: *c.udev) void {
-        const m = c.udev_monitor_new_from_netlink(ctx, "udev") orelse return;
-        _ = c.udev_monitor_filter_add_match_subsystem_devtype(m, "input", null);
-        if (c.udev_monitor_enable_receiving(m) < 0) {
-            _ = c.udev_monitor_unref(m);
+        const u = if (udev_api) |*api| api else return;
+        const m = u.udev_monitor_new_from_netlink(ctx, "udev") orelse return;
+        _ = u.udev_monitor_filter_add_match_subsystem_devtype(m, "input", null);
+        if (u.udev_monitor_enable_receiving(m) < 0) {
+            _ = u.udev_monitor_unref(m);
             return;
         }
         monitor = m;
-        monitor_fd = c.udev_monitor_get_fd(m);
+        monitor_fd = u.udev_monitor_get_fd(m);
     }
 
     fn enumerateExisting(ctx: *c.udev) void {
-        const en = c.udev_enumerate_new(ctx) orelse return;
-        defer _ = c.udev_enumerate_unref(en);
-        _ = c.udev_enumerate_add_match_subsystem(en, "input");
-        if (c.udev_enumerate_scan_devices(en) < 0) return;
+        const u = if (udev_api) |*api| api else return;
+        const en = u.udev_enumerate_new(ctx) orelse return;
+        defer _ = u.udev_enumerate_unref(en);
+        _ = u.udev_enumerate_add_match_subsystem(en, "input");
+        if (u.udev_enumerate_scan_devices(en) < 0) return;
 
-        var entry = c.udev_enumerate_get_list_entry(en);
-        while (entry) |e| : (entry = c.udev_list_entry_get_next(e)) {
-            const syspath = c.udev_list_entry_get_name(e) orelse continue;
-            const dev = c.udev_device_new_from_syspath(ctx, syspath) orelse continue;
-            defer _ = c.udev_device_unref(dev);
+        var entry = u.udev_enumerate_get_list_entry(en);
+        while (entry) |e| : (entry = u.udev_list_entry_get_next(e)) {
+            const syspath = u.udev_list_entry_get_name(e) orelse continue;
+            const dev = u.udev_device_new_from_syspath(ctx, syspath) orelse continue;
+            defer _ = u.udev_device_unref(dev);
             handleDevice(dev, .connected);
         }
     }
@@ -279,6 +336,7 @@ const LinuxSource = struct {
     /// Non-blocking drain of the udev monitor fd. We `poll()` with a 0 timeout
     /// so this never stalls the frame.
     fn pumpMonitor() void {
+        const u = if (udev_api) |*api| api else return;
         const m = monitor orelse return;
         if (monitor_fd < 0) return;
 
@@ -292,10 +350,10 @@ const LinuxSource = struct {
             if (ready == 0) return; // nothing pending
             if (pfd[0].revents & std.posix.POLL.IN == 0) return;
 
-            const dev = c.udev_monitor_receive_device(m) orelse return;
-            defer _ = c.udev_device_unref(dev);
+            const dev = u.udev_monitor_receive_device(m) orelse return;
+            defer _ = u.udev_device_unref(dev);
 
-            const action_c = c.udev_device_get_action(dev) orelse continue;
+            const action_c = u.udev_device_get_action(dev) orelse continue;
             const action = std.mem.span(action_c);
             if (std.mem.eql(u8, action, "add")) {
                 handleDevice(dev, .connected);
@@ -309,7 +367,8 @@ const LinuxSource = struct {
     /// Classify a udev device and, if it's a gamepad event node, push the
     /// matching connect/disconnect event + update the tracked table.
     fn handleDevice(dev: *c.udev_device, kind: GamepadEvent.Kind) void {
-        const sysname_c = c.udev_device_get_sysname(dev) orelse return;
+        const u = if (udev_api) |*api| api else return;
+        const sysname_c = u.udev_device_get_sysname(dev) orelse return;
         const sysname = std.mem.span(sysname_c);
 
         // Only ever track evdev `event*` nodes; drop the duplicate legacy
@@ -317,17 +376,64 @@ const LinuxSource = struct {
         if (!std.mem.startsWith(u8, sysname, "event")) return;
 
         // Gamepad filter: udev marks joysticks/gamepads with ID_INPUT_JOYSTICK=1.
-        if (!hasProp(dev, "ID_INPUT_JOYSTICK", "1")) return;
+        if (!hasProp(u, dev, "ID_INPUT_JOYSTICK", "1")) return;
 
         switch (kind) {
-            .connected => onConnect(dev, sysname),
+            .connected => onConnect(u, dev, sysname),
             .disconnected => onDisconnect(sysname),
         }
     }
 
-    fn onConnect(dev: *c.udev_device, sysname: []const u8) void {
-        // Already tracked? (re-enumerate or duplicate add) — ignore.
+    fn onConnect(u: *const Udev, dev: *c.udev_device, sysname: []const u8) void {
+        // Already tracked under this exact node? (re-enumerate / duplicate add)
         if (findBySysname(sysname) != null) return;
+
+        // Resolve identity first so we can de-dup by device GUID below: a single
+        // physical pad can expose multiple joystick-class `event*` nodes, and we
+        // want exactly one tracked slot per physical device.
+        var id: input_id = .{ .bustype = 0, .vendor = 0, .product = 0, .version = 0 };
+        var name_buf: [gamepad.NAME_CAPACITY]u8 = undefined;
+        var name: []const u8 = "";
+        var reason: gamepad.UnavailableReason = .none;
+
+        // Identity: try to open the node for EVIOCGID/EVIOCGNAME. On EACCES we
+        // fall back to udev properties (which don't need an open fd) and mark
+        // the device permission_denied so describe() can report it. With no
+        // devnode at all there's nothing to open and the node is unusable.
+        const devnode = u.udev_device_get_devnode(dev);
+        if (devnode) |dn| {
+            const path = std.mem.span(dn);
+            if (std.posix.openatZ(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0)) |fd| {
+                // std.posix.close does not exist in Zig 0.16; the evdev fd is a
+                // raw Linux fd, so close it through the linux syscall wrapper.
+                defer _ = std.os.linux.close(fd);
+                readId(fd, &id);
+                name = readName(fd, &name_buf);
+            } else |err| switch (err) {
+                error.AccessDenied => {
+                    reason = .permission_denied;
+                    logPermissionHintOnce(path);
+                },
+                else => {
+                    reason = .init_failed;
+                },
+            }
+        } else {
+            // No `/dev/input/event*` node exists for this device; we can detect
+            // it via udev but can never open/read it.
+            reason = .not_present;
+        }
+
+        // Backfill any identity fields the evdev ioctls didn't supply (open
+        // failed entirely, or EVIOCGID/EVIOCGNAME returned empty) from udev
+        // properties, which don't require an open fd.
+        fillFromProperties(u, dev, &id, &name_buf, &name);
+
+        const guid = makeGuid(id, devPhys(u, dev));
+
+        // De-dup by device identity: if another `event*` node of the same
+        // physical pad is already tracked, keep the first and drop this one.
+        if (findByGuid(guid) != null) return;
 
         const slot_idx = allocSlot() orelse {
             std.log.scoped(.gamepad).warn("gamepad track table full ({d}); ignoring {s}", .{ MAX_TRACKED, sysname });
@@ -339,38 +445,9 @@ const LinuxSource = struct {
         t.setSysname(sysname);
         t.slot = next_slot;
         next_slot +%= 1;
+        t.unavailable_reason = reason;
+        t.guid = guid;
 
-        // Identity: try to open the node for EVIOCGID/EVIOCGNAME. On EACCES we
-        // fall back to udev properties (which don't need an open fd) and mark
-        // the device permission_denied so describe() can report it.
-        const devnode = c.udev_device_get_devnode(dev);
-        var id: input_id = .{ .bustype = 0, .vendor = 0, .product = 0, .version = 0 };
-        var name_buf: [gamepad.NAME_CAPACITY]u8 = undefined;
-        var name: []const u8 = "";
-
-        var opened = false;
-        if (devnode) |dn| {
-            const path = std.mem.span(dn);
-            if (std.posix.openatZ(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0)) |fd| {
-                defer _ = std.os.linux.close(fd);
-                opened = true;
-                readId(fd, &id);
-                name = readName(fd, &name_buf);
-            } else |err| switch (err) {
-                error.AccessDenied => {
-                    t.unavailable_reason = .permission_denied;
-                    logPermissionHintOnce(path);
-                },
-                else => {
-                    t.unavailable_reason = .init_failed;
-                },
-            }
-        }
-
-        // Fall back to udev properties for id/name when we couldn't open.
-        if (!opened) fillFromProperties(dev, &id, &name_buf, &name);
-
-        t.guid = makeGuid(id, devPhys(dev));
         const n = @min(name.len, gamepad.NAME_CAPACITY);
         @memcpy(t.name[0..n], name[0..n]);
         @memset(t.name[n..], 0);
@@ -418,31 +495,44 @@ const LinuxSource = struct {
         return buf[0..len];
     }
 
-    fn fillFromProperties(dev: *c.udev_device, id: *input_id, buf: *[gamepad.NAME_CAPACITY]u8, name: *[]const u8) void {
+    /// Backfill identity fields from udev properties. Only fills a field the
+    /// evdev ioctls left at its zero/empty default, so this is safe to call
+    /// unconditionally after a (possibly partial) open: it never clobbers a
+    /// value the kernel already gave us, but it does rescue the case where the
+    /// open succeeded yet `EVIOCGID`/`EVIOCGNAME` returned nothing.
+    fn fillFromProperties(u: *const Udev, dev: *c.udev_device, id: *input_id, buf: *[gamepad.NAME_CAPACITY]u8, name: *[]const u8) void {
         // ID_VENDOR_ID / ID_MODEL_ID are 4-digit hex strings when present.
-        if (getProp(dev, "ID_VENDOR_ID")) |v| id.vendor = parseHex16(v);
-        if (getProp(dev, "ID_MODEL_ID")) |v| id.product = parseHex16(v);
-        if (getProp(dev, "ID_BUS")) |v| id.bustype = busTypeFromString(v);
-        if (getProp(dev, "ID_MODEL")) |v| {
-            const n = @min(v.len, gamepad.NAME_CAPACITY);
-            @memcpy(buf[0..n], v[0..n]);
-            name.* = buf[0..n];
+        if (id.vendor == 0) {
+            if (getProp(u, dev, "ID_VENDOR_ID")) |v| id.vendor = parseHex16(v);
+        }
+        if (id.product == 0) {
+            if (getProp(u, dev, "ID_MODEL_ID")) |v| id.product = parseHex16(v);
+        }
+        if (id.bustype == 0) {
+            if (getProp(u, dev, "ID_BUS")) |v| id.bustype = busTypeFromString(v);
+        }
+        if (name.len == 0) {
+            if (getProp(u, dev, "ID_MODEL")) |v| {
+                const n = @min(v.len, gamepad.NAME_CAPACITY);
+                @memcpy(buf[0..n], v[0..n]);
+                name.* = buf[0..n];
+            }
         }
     }
 
-    fn devPhys(dev: *c.udev_device) []const u8 {
-        return getProp(dev, "ID_PATH") orelse "";
+    fn devPhys(u: *const Udev, dev: *c.udev_device) []const u8 {
+        return getProp(u, dev, "ID_PATH") orelse "";
     }
 
     // ── udev property helpers ─────────────────────────────────────────
 
-    fn getProp(dev: *c.udev_device, key: [*:0]const u8) ?[]const u8 {
-        const v = c.udev_device_get_property_value(dev, key) orelse return null;
+    fn getProp(u: *const Udev, dev: *c.udev_device, key: [*:0]const u8) ?[]const u8 {
+        const v = u.udev_device_get_property_value(dev, key) orelse return null;
         return std.mem.span(v);
     }
 
-    fn hasProp(dev: *c.udev_device, key: [*:0]const u8, expect: []const u8) bool {
-        const v = getProp(dev, key) orelse return false;
+    fn hasProp(u: *const Udev, dev: *c.udev_device, key: [*:0]const u8, expect: []const u8) bool {
+        const v = getProp(u, dev, key) orelse return false;
         return std.mem.eql(u8, v, expect);
     }
 
@@ -451,6 +541,20 @@ const LinuxSource = struct {
     fn findBySysname(sysname: []const u8) ?usize {
         for (&tracked, 0..) |*t, i| {
             if (t.in_use and std.mem.eql(u8, t.sysnameSlice(), sysname)) return i;
+        }
+        return null;
+    }
+
+    /// Find a tracked slot whose device-identity GUID matches. Used to drop
+    /// the second/third `event*` node a single physical pad can expose so we
+    /// keep exactly one slot per device. An all-zero GUID is treated as
+    /// "no identity" and never matches (so distinct unidentifiable pads with
+    /// no devnode and no udev ids aren't collapsed into one).
+    fn findByGuid(guid: [16]u8) ?usize {
+        const zero = [_]u8{0} ** 16;
+        if (std.mem.eql(u8, &guid, &zero)) return null;
+        for (&tracked, 0..) |*t, i| {
+            if (t.in_use and std.mem.eql(u8, &t.guid, &guid)) return i;
         }
         return null;
     }
@@ -566,4 +670,20 @@ test "busTypeFromString maps udev ID_BUS strings" {
     try std.testing.expectEqual(@as(u16, 0x03), busTypeFromString("usb"));
     try std.testing.expectEqual(@as(u16, 0x05), busTypeFromString("bluetooth"));
     try std.testing.expectEqual(@as(u16, 0), busTypeFromString("i2c"));
+}
+
+test "findByGuid dedupes multiple event nodes of one physical pad" {
+    for (&LinuxSource.tracked) |*t| t.* = .{};
+    defer {
+        for (&LinuxSource.tracked) |*t| t.* = .{};
+    }
+
+    const guid = makeGuid(.{ .bustype = 3, .vendor = 0x045e, .product = 0x028e, .version = 0x0110 }, "");
+    LinuxSource.tracked[0] = .{ .in_use = true, .slot = 0, .guid = guid };
+
+    // A second event* node with the same identity must collide on GUID...
+    try std.testing.expect(LinuxSource.findByGuid(guid) != null);
+    // ...but an all-zero GUID is treated as "no identity" and never matches,
+    // so unidentifiable pads aren't collapsed into one slot.
+    try std.testing.expectEqual(@as(?usize, null), LinuxSource.findByGuid([_]u8{0} ** 16));
 }

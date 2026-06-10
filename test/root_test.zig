@@ -1477,3 +1477,51 @@ test "Coercion: non-void return is the only accepted shape" {
     const c = Coercion(.{ .impl = bodyToEntityImpl });
     _ = c;
 }
+
+// ── Gamepad event contract (core#18) ─────────────────────────────
+// Wave-0 fallback proof: a backend Impl with NO gamepad-event decls
+// (StubInput) yields 0 events / 0 descriptions through InputInterface,
+// and the per-OS gamepad_source skeleton drains 0 by default.
+
+test "InputInterface: backend with no decls yields 0 gamepad events" {
+    const I = InputInterface(StubInput);
+    var evbuf: [8]root.GamepadEvent = undefined;
+    try testing.expectEqual(@as(usize, 0), I.pollGamepadEvents(&evbuf));
+    var dbuf: [8]root.GamepadDescription = undefined;
+    try testing.expectEqual(@as(usize, 0), I.describeGamepads(&dbuf));
+}
+
+test "InputInterface: backend declaring decls is dispatched" {
+    const FakeBackend = struct {
+        pub fn isKeyDown(_: u32) bool {
+            return false;
+        }
+        pub fn isKeyPressed(_: u32) bool {
+            return false;
+        }
+        pub fn pollGamepadEvents(out: []root.GamepadEvent) usize {
+            if (out.len == 0) return 0;
+            out[0] = root.GamepadEvent.connected(0, "Fake Pad");
+            return 1;
+        }
+        pub fn describeGamepads(out: []root.GamepadDescription) usize {
+            if (out.len == 0) return 0;
+            out[0] = .{ .slot = 0, .connected = true };
+            return 1;
+        }
+    };
+    const I = InputInterface(FakeBackend);
+    var evbuf: [4]root.GamepadEvent = undefined;
+    try testing.expectEqual(@as(usize, 1), I.pollGamepadEvents(&evbuf));
+    try testing.expectEqualStrings("Fake Pad", evbuf[0].nameSlice());
+    try testing.expectEqual(@as(u32, 0), evbuf[0].id());
+    var dbuf: [4]root.GamepadDescription = undefined;
+    try testing.expectEqual(@as(usize, 1), I.describeGamepads(&dbuf));
+}
+
+test "gamepad_source: selected platform drains 0 events by default" {
+    var evbuf: [8]root.GamepadEvent = undefined;
+    root.gamepad_source.init();
+    defer root.gamepad_source.deinit();
+    try testing.expectEqual(@as(usize, 0), root.gamepad_source.pollEvents(&evbuf));
+}

@@ -105,6 +105,15 @@ const EventRing = struct {
     len: usize = 0,
     mutex: std.Thread.Mutex = .{},
 
+    /// Drop all queued events. Used on deinit so a later re-init can't observe
+    /// hotplug deltas that were queued before/during teardown.
+    fn clear(self: *EventRing) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.head = 0;
+        self.len = 0;
+    }
+
     fn push(self: *EventRing, ev: GamepadEvent) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -228,16 +237,27 @@ pub const Source = struct {
     /// Register the InputDeviceListener and enumerate existing devices.
     /// No-op (and never references JNI symbols) off Android.
     pub fn init() void {
-        if (comptime !is_android) return;
-        const activity = jni.sapp_android_get_native_activity();
-        if (activity == null) return; // no Activity yet → nothing to bind
-        jni.labelle_android_gamepad_init(activity);
+        // A plain `if (comptime !is_android) return;` would NOT stop the
+        // compiler from semantically analyzing the JNI references below on
+        // host targets (where `jni` is an empty struct). Wrap the whole
+        // platform-specific body in `if (comptime is_android)` so those
+        // symbols are only analyzed on Android.
+        if (comptime is_android) {
+            const activity = jni.sapp_android_get_native_activity();
+            if (activity == null) return; // no Activity yet → nothing to bind
+            jni.labelle_android_gamepad_init(activity);
+        }
     }
 
-    /// Unregister the listener.
+    /// Unregister the listener and drop any queued hotplug events so a later
+    /// `init` starts from a clean ring (no stale connect/disconnect deltas).
     pub fn deinit() void {
-        if (comptime !is_android) return;
-        jni.labelle_android_gamepad_shutdown();
+        if (comptime is_android) {
+            jni.labelle_android_gamepad_shutdown();
+        }
+        // Drain regardless of target so the module-level ring never carries
+        // events across a deinit/init cycle (harmless no-op on host).
+        ring.clear();
     }
 
     /// Drain queued hotplug events. Returns the count written to `out`.

@@ -104,19 +104,39 @@ test "selected platform source drains 0 events by default (stub)" {
     try std.testing.expectEqual(@as(usize, 0), describe(&dbuf));
 }
 
-test "every platform file compiles for its target and satisfies the contract" {
-    // Force-reference each platform file so AstGen + the comptime `Source`
-    // contract checks run for all of them regardless of host target.
-    inline for (.{
-        @import("android.zig"),
-        @import("linux.zig"),
-        @import("wasm.zig"),
-        @import("ios.zig"),
-        @import("unsupported.zig"),
-    }) |mod| {
-        comptime std.debug.assert(@hasDecl(mod, "Source"));
-        comptime std.debug.assert(@hasDecl(mod.Source, "pollEvents"));
-        var buf: [4]GamepadEvent = undefined;
-        try std.testing.expectEqual(@as(usize, 0), mod.Source.pollEvents(&buf));
-    }
+test "selector maps the build target to the expected platform file" {
+    // Assert the *selection logic* (not just that some Source exists): recompute
+    // the expected platform module from the target the same way `platform` does,
+    // and require the selector to have picked exactly that file. This fails if a
+    // selector branch is reordered, dropped, or mis-wired — unlike a check that
+    // only confirms `Source.pollEvents` exists, which every stub trivially passes.
+    //
+    // We deliberately do NOT force-import/compile every platform body on the host
+    // (that would make `zig build test` fail once Wave-1 adds host-unavailable
+    // SDK/JNI/browser code). Only the file selected for the current target is
+    // referenced here; foreign-platform bodies are compile-checked when built for
+    // their own target. The host-independent contract is frozen in the `comptime`
+    // block above (lines 67-73).
+    const os = builtin.target.os.tag;
+    const abi = builtin.target.abi;
+
+    const expected = comptime if (abi == .android or abi == .androideabi)
+        @import("android.zig")
+    else switch (os) {
+        .linux => @import("linux.zig"),
+        .ios, .tvos => @import("ios.zig"),
+        .wasi, .freestanding, .emscripten => if (builtin.target.cpu.arch.isWasm())
+            @import("wasm.zig")
+        else
+            @import("unsupported.zig"),
+        else => @import("unsupported.zig"),
+    };
+
+    // Same module => the selector picked the right file for this target.
+    try std.testing.expect(platform == expected);
+
+    // The selected source satisfies the frozen contract and behaves as a stub.
+    comptime std.debug.assert(@hasDecl(Source, "pollEvents"));
+    var buf: [4]GamepadEvent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), Source.pollEvents(&buf));
 }

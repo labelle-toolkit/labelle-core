@@ -247,46 +247,53 @@ const GcSource = struct {
 
         var written: usize = 0;
 
-        // Collect the live objc pointers, emitting `connected` for any not
-        // already tracked.
-        var seen: [MAX_CONTROLLERS]Id = [_]Id{null} ** MAX_CONTROLLERS;
-        var seen_len: usize = 0;
-
+        // Scan every live controller (the full array — do NOT stop at
+        // MAX_CONTROLLERS, or a still-connected controller past that index
+        // would be treated as absent and flap each frame). Emit `connected`
+        // for any not already tracked, but ONLY commit it to `tracked` when we
+        // can actually deliver the event. If `out` is full (or we're at
+        // capacity) we leave it untracked so the connect re-fires next poll
+        // instead of being silently tracked-without-emitting.
         var i: usize = 0;
-        while (i < live_count and seen_len < MAX_CONTROLLERS) : (i += 1) {
+        while (i < live_count) : (i += 1) {
             const ctrl = objc.msgSend_id_idx(arr, Sel.objectAtIndex, i) orelse continue;
-            seen[seen_len] = ctrl;
-            seen_len += 1;
 
             if (findController(ctrl) == null) {
-                // New controller — register and emit `connected`.
                 if (tracked_len >= MAX_CONTROLLERS) continue;
+                if (written >= out.len) continue; // re-detected next poll
                 const klass = classify(ctrl);
                 const slot = next_slot;
                 next_slot += 1;
                 tracked[tracked_len] = .{ .obj = ctrl, .slot = slot, .source_class = klass };
                 tracked_len += 1;
 
-                if (written < out.len) {
-                    out[written] = makeConnected(ctrl, slot, klass);
-                    written += 1;
-                }
+                out[written] = makeConnected(ctrl, slot, klass);
+                written += 1;
             }
         }
 
-        // Sweep: any tracked entry whose objc pointer is no longer live is a
-        // disconnect. Compact the array in place.
+        // Sweep: any tracked entry whose objc pointer is no longer in the live
+        // array is a disconnect. Liveness is checked against the full live
+        // array (not a bounded snapshot) so controllers past MAX_CONTROLLERS
+        // don't spuriously disconnect. Compact the array in place; only drop
+        // an entry once its `disconnected` event is actually emitted — if `out`
+        // is full, keep it tracked so the disconnect re-fires next poll.
         var w: usize = 0;
         var r: usize = 0;
         while (r < tracked_len) : (r += 1) {
             const entry = tracked[r];
-            if (containsPtr(seen[0..seen_len], entry.obj)) {
+            if (isLive(arr, live_count, entry.obj)) {
                 tracked[w] = entry;
                 w += 1;
             } else if (written < out.len) {
                 out[written] = GamepadEvent.disconnected(entry.slot);
                 written += 1;
                 // dropped (not copied forward)
+            } else {
+                // Buffer full — keep tracked so we retry the disconnect next
+                // poll rather than losing the transition.
+                tracked[w] = entry;
+                w += 1;
             }
         }
         tracked_len = w;
@@ -327,9 +334,13 @@ fn findController(ctrl: Id) ?usize {
     return null;
 }
 
-fn containsPtr(slice: []const Id, ptr: Id) bool {
-    for (slice) |p| {
-        if (p == ptr) return true;
+/// Is `ptr` present in the live `+[GCController controllers]` array? Scans the
+/// whole array (no MAX_CONTROLLERS bound) so a tracked controller is never
+/// falsely reported absent just because it sits past the registry capacity.
+fn isLive(arr: Id, live_count: usize, ptr: Id) bool {
+    var i: usize = 0;
+    while (i < live_count) : (i += 1) {
+        if (objc.msgSend_id_idx(arr, Sel.objectAtIndex, i) == ptr) return true;
     }
     return false;
 }
@@ -494,7 +505,7 @@ fn dpadButton(profile: Id, btn: Button) Id {
 }
 
 fn isButtonDownImpl(slot: u32, button_raw: u32) bool {
-    if (!is_apple_mobile) return false;
+    if (comptime !is_apple_mobile) return false;
     Sel.load();
     const profile = extendedProfile(slot) orelse return false;
     const btn: Button = @enumFromInt(button_raw);
@@ -506,7 +517,7 @@ fn isButtonDownImpl(slot: u32, button_raw: u32) bool {
 }
 
 fn axisValueImpl(slot: u32, axis_raw: u32) f32 {
-    if (!is_apple_mobile) return 0;
+    if (comptime !is_apple_mobile) return 0;
     Sel.load();
     const profile = extendedProfile(slot) orelse return 0;
     const axis: Axis = @enumFromInt(axis_raw);
@@ -563,7 +574,7 @@ fn gcAxisValue(slot: u32, axis: u32) callconv(.c) f32 {
 /// `bool labelle_gc_connected(uint32_t slot)` — slot currently has a live
 /// controller. (Backs `isGamepadAvailable` in the input backend.)
 fn gcConnected(slot: u32) callconv(.c) bool {
-    if (!is_apple_mobile) return false;
+    if (comptime !is_apple_mobile) return false;
     return controllerForSlot(slot) != null;
 }
 

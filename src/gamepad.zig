@@ -38,15 +38,19 @@ pub const TypeHint = enum(u8) {
 pub fn typeHintFromName(name: []const u8) TypeHint {
     if (containsIgnoreCase(name, "xbox") or
         containsIgnoreCase(name, "microsoft")) return .xbox;
+    // Nintendo BEFORE the PlayStation block: the latter treats the generic
+    // "wireless controller" as PlayStation, but Nintendo pads commonly report
+    // names like "Nintendo Switch Wireless Controller" — match the specific
+    // brand keywords first so they don't fall into the generic PS bucket.
+    if (containsIgnoreCase(name, "nintendo") or
+        containsIgnoreCase(name, "switch") or
+        containsIgnoreCase(name, "joy-con") or
+        containsIgnoreCase(name, "pro controller")) return .nintendo;
     if (containsIgnoreCase(name, "playstation") or
         containsIgnoreCase(name, "dualsense") or
         containsIgnoreCase(name, "dualshock") or
         containsIgnoreCase(name, "sony") or
         containsIgnoreCase(name, "wireless controller")) return .playstation;
-    if (containsIgnoreCase(name, "nintendo") or
-        containsIgnoreCase(name, "switch") or
-        containsIgnoreCase(name, "joy-con") or
-        containsIgnoreCase(name, "pro controller")) return .nintendo;
     if (name.len > 0) return .generic;
     return .unknown;
 }
@@ -199,6 +203,9 @@ test "typeHintFromName classifies known vendor families (name-only path)" {
     try std.testing.expectEqual(TypeHint.playstation, typeHintFromName("Wireless Controller"));
     try std.testing.expectEqual(TypeHint.nintendo, typeHintFromName("Nintendo Switch Pro Controller"));
     try std.testing.expectEqual(TypeHint.nintendo, typeHintFromName("Joy-Con (L)"));
+    // Nintendo brand keywords must win over the generic "wireless controller"
+    // PlayStation fallback (regression: this used to classify as playstation).
+    try std.testing.expectEqual(TypeHint.nintendo, typeHintFromName("Nintendo Switch Wireless Controller"));
     try std.testing.expectEqual(TypeHint.generic, typeHintFromName("Generic USB Joystick"));
     try std.testing.expectEqual(TypeHint.unknown, typeHintFromName(""));
 }

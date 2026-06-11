@@ -29,24 +29,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // --- Desktop gamepad source: link windowless SDL2 (core#28) ---
-    //
-    // `gamepad_source/desktop.zig` is selected for macOS/Windows desktop
-    // targets and reads gamepads through SDL2 (joystick/gamecontroller
-    // subsystems, no video). Every artifact that COMPILES core for a desktop
-    // target must therefore satisfy the SDL2 symbols. All SDL `extern`s are
-    // gated behind `comptime is_desktop`, so non-desktop targets pull no SDL.
-    //
-    // A module (`addModule`) cannot itself link a system library — that is a
-    // compile-step concern — so we link SDL on each compiling artifact (the
-    // two test artifacts here). Downstream consumers of the `labelle-core`
-    // module link SDL on their own desktop artifact via the core-unify path
-    // (see core#28; engine/backend build wiring is a follow-up PR).
-    if (isDesktopTarget(target)) {
-        linkDesktopSdl(b, tests);
-        linkDesktopSdl(b, root_tests);
-    }
-
     const run_tests = b.addRunArtifact(tests);
     const run_root_tests = b.addRunArtifact(root_tests);
     const test_step = b.step("test", "Run labelle-core tests");
@@ -100,39 +82,4 @@ pub fn build(b: *std.Build) void {
     // Fold the cross-compile checks into the default `test` target so CI (and
     // `zig build test`) can't go green while a per-OS file is broken.
     test_step.dependOn(check_platforms_step);
-}
-
-/// True when the resolved target is a desktop OS that currently SELECTS the
-/// SDL-backed `gamepad_source/desktop.zig` — i.e. macOS/Windows only. Mirrors
-/// the `is_desktop` comptime in that file. Linux is deliberately excluded: it
-/// still uses `gamepad_source/linux.zig` (libudev), not the SDL source, so we
-/// must NOT link SDL for it (no SDL is present on the Linux CI image; linking
-/// it would add an unused dependency and break the build). When Linux migrates
-/// from `linux.zig` to the SDL source, add `.linux` here as a noted follow-up.
-fn isDesktopTarget(target: std.Build.ResolvedTarget) bool {
-    const t = target.result;
-    if (t.abi == .android or t.abi == .androideabi) return false;
-    if (t.cpu.arch.isWasm()) return false;
-    return switch (t.os.tag) {
-        .macos, .windows => true,
-        else => false,
-    };
-}
-
-/// Link system SDL2 (joystick/gamecontroller subsystems) into a compile step
-/// for desktop targets. On macOS Homebrew the libs live under `/opt/homebrew`;
-/// we add that library path so `linkSystemLibrary` finds SDL2 without a
-/// pkg-config round-trip. We declare only the handful of SDL `extern`s we use
-/// in Zig (no `@cImport`), so no SDL headers — and thus no include path — are
-/// needed: the library path is purely for the linker to resolve `-lSDL2`.
-fn linkDesktopSdl(b: *std.Build, compile: *std.Build.Step.Compile) void {
-    const mod = compile.root_module;
-    mod.link_libc = true;
-    // Homebrew prefix on Apple Silicon. Harmless if absent on other hosts;
-    // `linkSystemLibrary` also consults the default system search paths.
-    if (compile.rootModuleTarget().os.tag == .macos) {
-        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-    }
-    mod.linkSystemLibrary("SDL2", .{});
-    _ = b;
 }

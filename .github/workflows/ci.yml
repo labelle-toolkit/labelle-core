@@ -17,5 +17,13 @@ jobs:
         with:
           version: '0.16.0'
 
+      # Cross-compile each gamepad_source per-OS platform file (android/ios/
+      # linux/wasm) so platform-only breaks can't merge silently (core#23,
+      # epic #609). Run first and on its own so a failure points straight at a
+      # platform file rather than hiding inside the test summary. Needs no
+      # NDK/SDK — it's a `build-obj` front-end compile-check, not a link.
+      - name: Cross-compile platform sources (gamepad_source)
+        run: zig build check-platforms --summary all
+
       - name: Run tests
         run: zig build test --summary all

@@ -415,6 +415,18 @@ var state: State = .{};
 /// window). Returns false if init failed (state queries then read as empty).
 fn ensureInit() bool {
     if (comptime !is_desktop) return false;
+
+    // Guard the whole init under `state.lock`: it flips `initialized`/
+    // `init_failed` and (via the startup enumeration below) mutates
+    // `state.slots` and the event ring. Without this, a backend that pumps
+    // `update()` off-thread could race init against a concurrent query.
+    // `ensureInit` is only ever called from `init()` and from the TOP of
+    // `update()` *before* it takes its own lock, and `openController` is a
+    // caller-holds-lock helper that never re-locks — so this cannot
+    // self-deadlock the non-reentrant spin lock.
+    state.lock.lock();
+    defer state.lock.unlock();
+
     if (state.initialized) return true;
     if (state.init_failed) return false;
 

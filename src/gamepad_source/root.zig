@@ -29,7 +29,27 @@
 //! `Source` plus thin wrappers (`init`/`deinit`/`pollEvents`/`describe`) that
 //! apply the `@hasDecl` fallbacks, so callers get a uniform surface.
 //!
-//! See labelle-toolkit/labelle-core#18.
+//! ## Optional STATE surface (core#28)
+//!
+//! Beyond hotplug detection, a source MAY also carry button/axis **state** so
+//! the engine can read controllers through the platform source instead of the
+//! render backend's bundled library. The optional state contract is:
+//!
+//! ```zig
+//!     pub fn update() void {}                          // pump once per frame
+//!     pub fn isAvailable(slot: u32) bool { ... }
+//!     pub fn isButtonDown(slot: u32, button: u32) bool { ... }
+//!     pub fn isButtonPressed(slot: u32, button: u32) bool { ... }
+//!     pub fn axisValue(slot: u32, axis: u32) f32 { ... }
+//! ```
+//!
+//! All five are OPTIONAL and resolved via `@hasDecl` at the wrappers below, so
+//! detection-only sources (android/ios/linux/wasm/unsupported) that define
+//! only `pollEvents` still satisfy the contract. Buttons/axes use the
+//! canonical raylib-compatible numbering. `hasState()` lets the engine decide
+//! at comptime whether to prefer the source over the backend `Impl`.
+//!
+//! See labelle-toolkit/labelle-core#18 and #28.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -57,8 +77,14 @@ pub const platform = blk: {
     }
 
     break :blk switch (os) {
+        // Linux keeps its hand-rolled libudev source for now. Consolidating
+        // Linux onto the SDL-backed `desktop.zig` (which would also give Linux
+        // button/axis *state*) is a deliberate follow-up — see core#28 — so
+        // this PR does not disturb the working evdev/udev detection path.
         .linux => @import("linux.zig"), // TODO(assembler#249)
         .ios, .tvos => @import("ios.zig"), // TODO(assembler#251)
+        // macOS / Windows: windowless SDL2 desktop source (detection + state).
+        .macos, .windows => @import("desktop.zig"), // core#28
         .wasi, .freestanding, .emscripten => if (builtin.target.cpu.arch.isWasm())
             @import("wasm.zig") // TODO(assembler#249)
         else
@@ -69,6 +95,16 @@ pub const platform = blk: {
 
 /// The selected platform's `Source` namespace (see module doc for shape).
 pub const Source = platform.Source;
+
+/// The windowless-SDL desktop module, re-exported ONLY on the desktop targets
+/// that select it (macOS/Windows). Lets host tests exercise its pure
+/// SDL→canonical mapping/normalize helpers directly (they execute on the
+/// host, unlike the platform files' inline `test` blocks, which the
+/// `src/root.zig` test artifact does not collect). `null` elsewhere.
+pub const desktop = if (builtin.target.os.tag == .macos or builtin.target.os.tag == .windows)
+    @import("desktop.zig")
+else
+    null;
 
 comptime {
     // Freeze the contract: every platform file MUST expose `Source.pollEvents`.
@@ -101,13 +137,69 @@ pub fn describe(out: []GamepadDescription) usize {
     return 0;
 }
 
-test "selected platform source drains 0 events by default (stub)" {
+// ── Optional STATE surface (core#28) ────────────────────────────────────
+//
+// Forwarders for the optional button/axis state contract. Each is guarded by
+// `@hasDecl` so detection-only sources (which define only `pollEvents`) keep
+// compiling; on those the wrapper is a safe no-op (false/0). Callers (the
+// engine, in a follow-up PR) read these to source gamepad state from the
+// platform rather than the render backend.
+
+/// True at comptime when the selected source implements the full state
+/// surface. Lets callers prefer the source over the backend `Impl` only when
+/// it can actually answer state queries.
+pub fn hasState() bool {
+    return @hasDecl(Source, "isAvailable") and
+        @hasDecl(Source, "isButtonDown") and
+        @hasDecl(Source, "isButtonPressed") and
+        @hasDecl(Source, "axisValue");
+}
+
+/// Pump/refresh the source once per frame. No-op when the source omits it
+/// (detection-only sources need no per-frame pump).
+pub fn update() void {
+    if (@hasDecl(Source, "update")) Source.update();
+}
+
+/// True if a controller is connected in `slot`. False when unsupported.
+pub fn isAvailable(slot: u32) bool {
+    if (@hasDecl(Source, "isAvailable")) return Source.isAvailable(slot);
+    return false;
+}
+
+/// True while canonical `button` is held on `slot`. False when unsupported.
+pub fn isButtonDown(slot: u32, button: u32) bool {
+    if (@hasDecl(Source, "isButtonDown")) return Source.isButtonDown(slot, button);
+    return false;
+}
+
+/// True on the frame canonical `button` transitions up→down on `slot`.
+/// False when unsupported.
+pub fn isButtonPressed(slot: u32, button: u32) bool {
+    if (@hasDecl(Source, "isButtonPressed")) return Source.isButtonPressed(slot, button);
+    return false;
+}
+
+/// Normalized value of canonical `axis` on `slot` (sticks [-1,1], triggers
+/// [0,1]). 0 when unsupported.
+pub fn axisValue(slot: u32, axis: u32) f32 {
+    if (@hasDecl(Source, "axisValue")) return Source.axisValue(slot, axis);
+    return 0;
+}
+
+test "selected platform source: init/poll/describe are call-safe and bounded" {
+    // NOTE: do NOT assert a zero count here. On macOS/Windows the desktop
+    // source enumerates already-attached controllers during `init()` and
+    // queues `.connected` events, so a host with a gamepad plugged in
+    // legitimately returns >0. Assert only call-safety + the buffer bound
+    // (matches the relaxation already applied to the sibling test in
+    // `test/root_test.zig`); a fixed count would flake on a populated host.
     var buf: [8]GamepadEvent = undefined;
     init();
     defer deinit();
-    try std.testing.expectEqual(@as(usize, 0), pollEvents(&buf));
+    try std.testing.expect(pollEvents(&buf) <= buf.len);
     var dbuf: [8]GamepadDescription = undefined;
-    try std.testing.expectEqual(@as(usize, 0), describe(&dbuf));
+    try std.testing.expect(describe(&dbuf) <= dbuf.len);
 }
 
 test "selector maps the build target to the expected platform file" {
@@ -131,6 +223,7 @@ test "selector maps the build target to the expected platform file" {
     else switch (os) {
         .linux => @import("linux.zig"),
         .ios, .tvos => @import("ios.zig"),
+        .macos, .windows => @import("desktop.zig"),
         .wasi, .freestanding, .emscripten => if (builtin.target.cpu.arch.isWasm())
             @import("wasm.zig")
         else
@@ -144,5 +237,24 @@ test "selector maps the build target to the expected platform file" {
     // The selected source satisfies the frozen contract and behaves as a stub.
     comptime std.debug.assert(@hasDecl(Source, "pollEvents"));
     var buf: [4]GamepadEvent = undefined;
-    try std.testing.expectEqual(@as(usize, 0), Source.pollEvents(&buf));
+    _ = Source.pollEvents(&buf);
+}
+
+test "optional state surface forwards safely on every host target" {
+    // The wrappers must be callable regardless of whether the selected source
+    // implements the state contract. On a detection-only host source they
+    // return the safe defaults; on the SDL desktop source (macOS/Windows host)
+    // they read as empty because no `update()`/controllers exist headlessly.
+    update();
+    try std.testing.expect(!isAvailable(0));
+    try std.testing.expect(!isButtonDown(0, 1));
+    try std.testing.expect(!isButtonPressed(0, 1));
+    try std.testing.expectEqual(@as(f32, 0), axisValue(0, 0));
+
+    // `hasState()` is true exactly when the source defines all four queries.
+    const expect_state = @hasDecl(Source, "isAvailable") and
+        @hasDecl(Source, "isButtonDown") and
+        @hasDecl(Source, "isButtonPressed") and
+        @hasDecl(Source, "axisValue");
+    try std.testing.expectEqual(expect_state, hasState());
 }

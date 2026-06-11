@@ -120,11 +120,11 @@ fn isDesktopTarget(target: std.Build.ResolvedTarget) bool {
 }
 
 /// Link system SDL2 (joystick/gamecontroller subsystems) into a compile step
-/// for desktop targets. On macOS Homebrew the headers/libs live under
-/// `/opt/homebrew`; we add that include/lib path so `linkSystemLibrary` finds
-/// SDL2 without a pkg-config round-trip. We declare only the handful of SDL
-/// `extern`s we use in Zig, so no SDL headers are needed at compile time —
-/// the include/lib paths are purely for the linker to resolve `-lSDL2`.
+/// for desktop targets. On macOS Homebrew the libs live under `/opt/homebrew`;
+/// we add that library path so `linkSystemLibrary` finds SDL2 without a
+/// pkg-config round-trip. We declare only the handful of SDL `extern`s we use
+/// in Zig (no `@cImport`), so no SDL headers — and thus no include path — are
+/// needed: the library path is purely for the linker to resolve `-lSDL2`.
 fn linkDesktopSdl(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const mod = compile.root_module;
     mod.link_libc = true;
@@ -132,7 +132,6 @@ fn linkDesktopSdl(b: *std.Build, compile: *std.Build.Step.Compile) void {
     // `linkSystemLibrary` also consults the default system search paths.
     if (compile.rootModuleTarget().os.tag == .macos) {
         mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
     }
     mod.linkSystemLibrary("SDL2", .{});
     _ = b;

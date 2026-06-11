@@ -1519,11 +1519,17 @@ test "InputInterface: backend declaring decls is dispatched" {
     try testing.expectEqual(@as(usize, 1), I.describeGamepads(&dbuf));
 }
 
-test "gamepad_source: selected platform drains 0 events by default" {
+test "gamepad_source: selected platform init + drain is call-safe" {
+    // The desktop SDL source now enumerates controllers already plugged in at
+    // launch (core#29), so on a host with a live pad attached `init()` legitly
+    // queues `.connected` events. We therefore do NOT assert a zero count
+    // (that would be flaky on a populated host); we only assert init/drain/
+    // deinit are call-safe and the drained count never exceeds the buffer.
     var evbuf: [8]root.GamepadEvent = undefined;
     root.gamepad_source.init();
     defer root.gamepad_source.deinit();
-    try testing.expectEqual(@as(usize, 0), root.gamepad_source.pollEvents(&evbuf));
+    const n = root.gamepad_source.pollEvents(&evbuf);
+    try testing.expect(n <= evbuf.len);
 }
 
 // ── Optional STATE surface forwarders (core#28) ──────────────────────────

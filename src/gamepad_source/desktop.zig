@@ -312,7 +312,11 @@ const sdl = if (is_desktop) struct {
     extern fn SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) c_int;
     extern fn SDL_GameControllerUpdate() void;
     extern fn SDL_PollEvent(event: *SDL_Event) c_int;
-    extern fn SDL_IsGameController(joystick_index: c_int) c_int; // SDL_bool
+    // Count of currently-attached joysticks; used to enumerate controllers
+    // already plugged in at startup (SDL does not emit CONTROLLERDEVICEADDED
+    // for those). Returns a negative value on error.
+    extern fn SDL_NumJoysticks() c_int;
+    extern fn SDL_IsGameController(joystick_index: c_int) c_int; // SDL_bool (SDL_TRUE == 1)
     extern fn SDL_GameControllerOpen(joystick_index: c_int) ?*SDL_GameController;
     extern fn SDL_GameControllerClose(gamecontroller: *SDL_GameController) void;
     extern fn SDL_GameControllerName(gamecontroller: *SDL_GameController) ?[*:0]const u8;
@@ -422,6 +426,24 @@ fn ensureInit() bool {
         return false;
     }
     state.initialized = true;
+
+    // SDL does NOT emit `SDL_CONTROLLERDEVICEADDED` for controllers that were
+    // already plugged in before the subsystem came up, so a pad connected at
+    // launch would never be tracked. Mirror `linux.zig`'s init-time
+    // enumeration: walk the currently-attached joysticks and open the game
+    // controllers via the SAME `openController` path the ADDED event uses, so
+    // each emits a `.connected` event that `pollEvents` then drains. This runs
+    // exactly once, here, where the init guard flips. `SDL_NumJoysticks` can
+    // return negative on error; clamping the upper bound to 0 makes the loop a
+    // no-op in that case.
+    const n = sdl.SDL_NumJoysticks();
+    var i: c_int = 0;
+    while (i < n) : (i += 1) {
+        // `openController` re-checks `SDL_IsGameController` itself, but gate
+        // here too so we only touch device indices SDL reports as controllers.
+        if (sdl.SDL_IsGameController(i) != 0) openController(i);
+    }
+
     return true;
 }
 
@@ -510,6 +532,15 @@ pub const Source = struct {
 
     /// Close all controllers and shut down the SDL subsystems.
     pub fn deinit() void {
+        // Take `state.lock` for the whole teardown so it can't race a
+        // concurrent `update()`/`pollEvents()`/query off another thread,
+        // matching this file's locking discipline. The teardown closes SDL
+        // controllers INLINE (it does not call `closeController`, which also
+        // takes `state.lock`), so holding the lock here cannot self-deadlock
+        // the non-reentrant spin lock.
+        state.lock.lock();
+        defer state.lock.unlock();
+
         if (comptime is_desktop) {
             if (state.initialized) {
                 for (&state.slots) |*s| {
@@ -723,4 +754,26 @@ test "state queries are safe (and empty) on the host with no SDL pump" {
     try std.testing.expectEqual(@as(f32, 0), Source.axisValue(99, 0));
     var ebuf: [4]GamepadEvent = undefined;
     _ = Source.pollEvents(&ebuf);
+}
+
+test "init + startup enumeration + deinit is call-safe on the host" {
+    // Exercises the lazy-init path that now enumerates already-attached
+    // controllers (Fix A) and the lock-guarded teardown (Fix B). On a
+    // non-desktop build these are no-ops; on the host they touch SDL but must
+    // not crash regardless of whether a pad is attached. We deliberately do
+    // NOT assert any controller is/isn't present (the host may have a live pad
+    // attached, which would make such assertions flaky) — only that the calls
+    // are safe and that queries afterward stay within their range guarantees.
+    Source.init();
+    defer Source.deinit();
+
+    // Draining whatever the enumeration may (or may not) have queued is safe.
+    var ebuf: [MAX_GAMEPADS]GamepadEvent = undefined;
+    _ = Source.pollEvents(&ebuf);
+
+    // Out-of-range guarantees still hold after init regardless of attach state.
+    try std.testing.expect(!Source.isAvailable(99));
+    try std.testing.expect(!Source.isButtonDown(0, 0));
+    try std.testing.expect(!Source.isButtonDown(0, 9999));
+    try std.testing.expectEqual(@as(f32, 0), Source.axisValue(99, 0));
 }

@@ -43,6 +43,14 @@ pub const GamepadDescription = gamepad.GamepadDescription;
 // into `../gamepad.zig`. Without it `android.zig` fails to compile for the
 // Android target (labelle-core#23).
 pub const SourceClass = gamepad.SourceClass;
+/// Re-exported alongside the name classifier so per-OS source files can name
+/// the result type through `@import("root.zig")`.
+pub const TypeHint = gamepad.TypeHint;
+/// Re-exported so per-OS source files can derive a `TypeHint` from a device
+/// name (the name-only classification path) through `@import("root.zig")`
+/// without reaching back into `../gamepad.zig`. Shared so Android, raylib and
+/// the web source classify identical name strings the same way (#270).
+pub const typeHintFromName = gamepad.typeHintFromName;
 
 /// Comptime OS/abi dispatch. Each branch maps to exactly one owned file so
 /// parallel Wave-1 work never collides. Android is detected via abi (there

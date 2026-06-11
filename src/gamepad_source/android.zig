@@ -236,6 +236,11 @@ export fn labelle_android_on_device_added(
     ev.setName(name);
     ev.guid = descriptorGuid(descriptor);
     ev.source_class = classifySources(sources);
+    // Derive the vendor family from the name (Android exposes no stable USB
+    // vendor id here), matching the desktop/web name-only path so the HUD shows
+    // e.g. `Pad 9: Xbox Wireless Controller [xbox]` instead of `[unknown]`
+    // (labelle-assembler#270). Uses the buffered name so truncation is honored.
+    ev.type_hint = source.typeHintFromName(ev.nameSlice());
     ring.push(ev);
 }
 
@@ -341,6 +346,18 @@ test "EventRing overflow drops oldest" {
     try std.testing.expectEqual(@as(usize, RING_CAPACITY), n);
     // Oldest 5 (slots 0..4) were dropped; first surviving slot is 5.
     try std.testing.expectEqual(@as(u32, 5), out[0].slot);
+}
+
+test "device-added uses the shared name classifier for type_hint (#270)" {
+    // The `labelle_android_on_device_added` body early-returns off Android, so we
+    // exercise the same name→type_hint derivation it performs (`setName` then
+    // `typeHintFromName(nameSlice())`) to lock in the wiring that drives the HUD.
+    var ev = GamepadEvent{ .kind = .connected, .slot = 9 };
+    ev.setName("Xbox Wireless Controller");
+    ev.type_hint = source.typeHintFromName(ev.nameSlice());
+    try std.testing.expectEqual(source.GamepadEvent.Kind.connected, ev.kind);
+    try std.testing.expectEqualStrings("Xbox Wireless Controller", ev.nameSlice());
+    try std.testing.expectEqual(source.TypeHint.xbox, ev.type_hint);
 }
 
 test "pollEvents returns 0 on host (no Android activity)" {

@@ -26,6 +26,35 @@ pub const TypeHint = enum(u8) {
     generic,
 };
 
+/// Best-guess vendor family from a human-readable device name string.
+///
+/// Shared name→type classifier for any source that only has a name to go on
+/// (Android `InputDevice.getName()`, raylib's `GetGamepadName`, the WebGamepad
+/// `id` string). Backends with a stable USB vendor id (Linux evdev, iOS GC
+/// profile) should classify from that instead — this is the name-only path.
+///
+/// Matching is case-insensitive substring. A non-empty name that matches no
+/// known family is `.generic`; an empty name is `.unknown`.
+pub fn typeHintFromName(name: []const u8) TypeHint {
+    if (containsIgnoreCase(name, "xbox") or
+        containsIgnoreCase(name, "microsoft")) return .xbox;
+    if (containsIgnoreCase(name, "playstation") or
+        containsIgnoreCase(name, "dualsense") or
+        containsIgnoreCase(name, "dualshock") or
+        containsIgnoreCase(name, "sony") or
+        containsIgnoreCase(name, "wireless controller")) return .playstation;
+    if (containsIgnoreCase(name, "nintendo") or
+        containsIgnoreCase(name, "switch") or
+        containsIgnoreCase(name, "joy-con") or
+        containsIgnoreCase(name, "pro controller")) return .nintendo;
+    if (name.len > 0) return .generic;
+    return .unknown;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
+}
+
 /// What kind of physical device produced the event. Distinguishes a real
 /// game controller from a TV / set-top "d-pad remote" (Android TV, tvOS),
 /// which should usually be treated differently by menus.
@@ -159,6 +188,19 @@ test "setName truncates to NAME_CAPACITY and stays NUL-terminated" {
     ev.setName(long);
     try std.testing.expectEqual(@as(usize, NAME_CAPACITY), ev.nameSlice().len);
     try std.testing.expectEqual(@as(u8, 0), ev.name[NAME_CAPACITY]); // sentinel intact
+}
+
+test "typeHintFromName classifies known vendor families (name-only path)" {
+    try std.testing.expectEqual(TypeHint.xbox, typeHintFromName("Xbox Wireless Controller"));
+    try std.testing.expectEqual(TypeHint.xbox, typeHintFromName("XBOX 360 For Windows"));
+    try std.testing.expectEqual(TypeHint.xbox, typeHintFromName("Microsoft X-Box pad"));
+    try std.testing.expectEqual(TypeHint.playstation, typeHintFromName("Sony DualSense Wireless Controller"));
+    try std.testing.expectEqual(TypeHint.playstation, typeHintFromName("PLAYSTATION(R)3 Controller"));
+    try std.testing.expectEqual(TypeHint.playstation, typeHintFromName("Wireless Controller"));
+    try std.testing.expectEqual(TypeHint.nintendo, typeHintFromName("Nintendo Switch Pro Controller"));
+    try std.testing.expectEqual(TypeHint.nintendo, typeHintFromName("Joy-Con (L)"));
+    try std.testing.expectEqual(TypeHint.generic, typeHintFromName("Generic USB Joystick"));
+    try std.testing.expectEqual(TypeHint.unknown, typeHintFromName(""));
 }
 
 test "disconnected constructor" {

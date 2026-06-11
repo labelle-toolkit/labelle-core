@@ -284,11 +284,15 @@ const sdl = if (is_desktop) struct {
     // index/id which live in a `SDL_ControllerDeviceEvent`. To stay ABI-safe
     // without transcribing the whole union we over-size the buffer and decode
     // the two device-event layouts we care about by offset via a typed view.
+    //
+    // The real SDL_Event contains 64-bit fields and must be 8-byte aligned;
+    // passing an under-aligned pointer to SDL_PollEvent is UB on ARM64. We
+    // force 8-byte alignment by sizing the padding in u64 units.
     const SDL_EVENT_SIZE = 64;
     const SDL_Event = extern union {
         type: u32,
         cdevice: SDL_ControllerDeviceEvent,
-        padding: [SDL_EVENT_SIZE]u8,
+        padding: [SDL_EVENT_SIZE / 8]u64,
     };
 
     // SDL_ControllerDeviceEvent { Uint32 type; Uint32 timestamp; Sint32 which; }
@@ -431,8 +435,13 @@ fn openController(joystick_index: c_int) void {
     const slot_idx = state.freeSlot() orelse return;
     const ctrl = sdl.SDL_GameControllerOpen(joystick_index) orelse return;
 
-    const js = sdl.SDL_GameControllerGetJoystick(ctrl);
-    const instance_id: i32 = if (js) |j| sdl.SDL_JoystickInstanceID(j) else 0;
+    // A null joystick can't yield a usable instance id; defaulting to 0 would
+    // collide with a real instance id 0. Close the handle and bail instead.
+    const js = sdl.SDL_GameControllerGetJoystick(ctrl) orelse {
+        sdl.SDL_GameControllerClose(ctrl);
+        return;
+    };
+    const instance_id: i32 = sdl.SDL_JoystickInstanceID(js);
 
     // Reject duplicates (SDL can re-emit ADDED on remap); close the extra handle.
     if (state.slotForInstance(instance_id) != null) {
@@ -551,6 +560,8 @@ pub const Source = struct {
     pub fn isAvailable(slot: u32) bool {
         if (comptime !is_desktop) return false;
         if (slot >= MAX_GAMEPADS) return false;
+        state.lock.lock();
+        defer state.lock.unlock();
         return state.slots[slot].controller != null;
     }
 
@@ -558,6 +569,8 @@ pub const Source = struct {
     pub fn isButtonDown(slot: u32, button: u32) bool {
         if (comptime !is_desktop) return false;
         if (slot >= MAX_GAMEPADS or button == 0 or button > MAX_CANONICAL_BUTTON) return false;
+        state.lock.lock();
+        defer state.lock.unlock();
         return state.slots[slot].cur_buttons[button];
     }
 
@@ -566,6 +579,8 @@ pub const Source = struct {
     pub fn isButtonPressed(slot: u32, button: u32) bool {
         if (comptime !is_desktop) return false;
         if (slot >= MAX_GAMEPADS or button == 0 or button > MAX_CANONICAL_BUTTON) return false;
+        state.lock.lock();
+        defer state.lock.unlock();
         const s = &state.slots[slot];
         return s.cur_buttons[button] and !s.prev_buttons[button];
     }
@@ -575,6 +590,8 @@ pub const Source = struct {
     pub fn axisValue(slot: u32, axis: u32) f32 {
         if (comptime !is_desktop) return 0;
         if (slot >= MAX_GAMEPADS) return 0;
+        state.lock.lock();
+        defer state.lock.unlock();
         const ctrl = state.slots[slot].controller orelse return 0;
         const sdl_axis = canonicalAxisToSdl(axis) orelse return 0;
         const raw = sdl.SDL_GameControllerGetAxis(@ptrCast(ctrl), sdl_axis);
@@ -584,6 +601,8 @@ pub const Source = struct {
     /// Diagnostic enumeration: one entry per connected slot.
     pub fn describe(out: []GamepadDescription) usize {
         if (comptime !is_desktop) return 0;
+        state.lock.lock();
+        defer state.lock.unlock();
         var n: usize = 0;
         for (state.slots, 0..) |s, i| {
             if (n >= out.len) break;

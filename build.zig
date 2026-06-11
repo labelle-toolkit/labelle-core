@@ -102,11 +102,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(check_platforms_step);
 }
 
-/// True when the resolved target is a native desktop OS (macOS/Windows/Linux),
-/// i.e. one that selects the SDL-backed `gamepad_source/desktop.zig`. Mirrors
-/// the `is_desktop` comptime in that file. Note: only macOS/Windows currently
-/// SELECT desktop.zig in root.zig (Linux keeps libudev), but we still link SDL
-/// for any desktop OS so a future Linux switch needs no build change.
+/// True when the resolved target is a desktop OS that currently SELECTS the
+/// SDL-backed `gamepad_source/desktop.zig` — i.e. macOS/Windows only. Mirrors
+/// the `is_desktop` comptime in that file. Linux is deliberately excluded: it
+/// still uses `gamepad_source/linux.zig` (libudev), not the SDL source, so we
+/// must NOT link SDL for it (no SDL is present on the Linux CI image; linking
+/// it would add an unused dependency and break the build). When Linux migrates
+/// from `linux.zig` to the SDL source, add `.linux` here as a noted follow-up.
 fn isDesktopTarget(target: std.Build.ResolvedTarget) bool {
     const t = target.result;
     if (t.abi == .android or t.abi == .androideabi) return false;

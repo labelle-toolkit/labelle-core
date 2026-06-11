@@ -187,13 +187,19 @@ pub fn axisValue(slot: u32, axis: u32) f32 {
     return 0;
 }
 
-test "selected platform source drains 0 events by default (stub)" {
+test "selected platform source: init/poll/describe are call-safe and bounded" {
+    // NOTE: do NOT assert a zero count here. On macOS/Windows the desktop
+    // source enumerates already-attached controllers during `init()` and
+    // queues `.connected` events, so a host with a gamepad plugged in
+    // legitimately returns >0. Assert only call-safety + the buffer bound
+    // (matches the relaxation already applied to the sibling test in
+    // `test/root_test.zig`); a fixed count would flake on a populated host.
     var buf: [8]GamepadEvent = undefined;
     init();
     defer deinit();
-    try std.testing.expectEqual(@as(usize, 0), pollEvents(&buf));
+    try std.testing.expect(pollEvents(&buf) <= buf.len);
     var dbuf: [8]GamepadDescription = undefined;
-    try std.testing.expectEqual(@as(usize, 0), describe(&dbuf));
+    try std.testing.expect(describe(&dbuf) <= dbuf.len);
 }
 
 test "selector maps the build target to the expected platform file" {

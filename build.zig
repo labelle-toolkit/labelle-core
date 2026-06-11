@@ -34,4 +34,52 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run labelle-core tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_root_tests.step);
+
+    // --- Cross-compile platform compile-checks (labelle-core#23, epic #609) ---
+    //
+    // The host `test` step only ever compiles the gamepad_source platform file
+    // selected for the host (`unsupported.zig`); the per-OS files
+    // (android/ios/linux/wasm) are never analysed, so platform-only breaks
+    // merge silently (see #25/#248, and the cli WASM atomic regression).
+    //
+    // For each foreign target we cross-compile `gamepad_source/platform_check.zig`,
+    // which `refAllDeclsRecursive`'s that target's `Source` and explicitly
+    // references the contract surface — forcing full front-end analysis of the
+    // platform file's function bodies. `build-obj` (compile, no link) catches
+    // the front-end error classes we miss (missing decls, removed std APIs,
+    // illegal atomics, type errors). No NDK/SDK/browser linkage is required:
+    // android's JNI symbols are `@extern`s that compile fine at build-obj.
+    const platform_targets = [_]std.Target.Query{
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .android },
+        .{ .cpu_arch = .aarch64, .os_tag = .ios },
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
+        .{ .cpu_arch = .wasm32, .os_tag = .freestanding },
+    };
+
+    const check_platforms_step = b.step(
+        "check-platforms",
+        "Cross-compile each gamepad_source per-OS platform file (compile-check)",
+    );
+
+    for (platform_targets) |query| {
+        const resolved = b.resolveTargetQuery(query);
+        const abi_tag = if (query.abi) |a| @tagName(a) else "none";
+        const obj = b.addObject(.{
+            .name = b.fmt("gamepad_source_check_{s}_{s}_{s}", .{
+                @tagName(query.cpu_arch.?),
+                @tagName(query.os_tag.?),
+                abi_tag,
+            }),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/gamepad_source_platform_check.zig"),
+                .target = resolved,
+                .optimize = optimize,
+            }),
+        });
+        check_platforms_step.dependOn(&obj.step);
+    }
+
+    // Fold the cross-compile checks into the default `test` target so CI (and
+    // `zig build test`) can't go green while a per-OS file is broken.
+    test_step.dependOn(check_platforms_step);
 }

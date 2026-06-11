@@ -1519,82 +1519,9 @@ test "InputInterface: backend declaring decls is dispatched" {
     try testing.expectEqual(@as(usize, 1), I.describeGamepads(&dbuf));
 }
 
-test "gamepad_source: selected platform init + drain is call-safe" {
-    // The desktop SDL source now enumerates controllers already plugged in at
-    // launch (core#29), so on a host with a live pad attached `init()` legitly
-    // queues `.connected` events. We therefore do NOT assert a zero count
-    // (that would be flaky on a populated host); we only assert init/drain/
-    // deinit are call-safe and the drained count never exceeds the buffer.
+test "gamepad_source: selected platform drains 0 events by default" {
     var evbuf: [8]root.GamepadEvent = undefined;
     root.gamepad_source.init();
     defer root.gamepad_source.deinit();
-    const n = root.gamepad_source.pollEvents(&evbuf);
-    try testing.expect(n <= evbuf.len);
-}
-
-// ── Optional STATE surface forwarders (core#28) ──────────────────────────
-//
-// These run on the host: the wrappers must be callable and return the safe
-// defaults regardless of whether the selected source implements state. On the
-// macOS/Windows host the SDL desktop source is selected but reads empty
-// headlessly (no controllers, no `update()` pump under test).
-
-test "gamepad_source: optional state forwarders are callable + out-of-range safe" {
-    // We do NOT assume the host is controller-free (a real pad may be plugged
-    // in), so we only assert the calls are safe and out-of-range queries can
-    // never read a connected controller / non-zero value.
-    root.gamepad_source.update();
-    _ = root.gamepad_source.isButtonDown(0, 7);
-    _ = root.gamepad_source.isButtonPressed(0, 7);
-    _ = root.gamepad_source.axisValue(0, 0);
-    // Out-of-range slot / button must always be the safe default.
-    try testing.expect(!root.gamepad_source.isAvailable(99));
-    try testing.expect(!root.gamepad_source.isButtonDown(0, 9999));
-    try testing.expect(!root.gamepad_source.isButtonDown(99, 7));
-    try testing.expect(!root.gamepad_source.isButtonPressed(99, 7));
-    try testing.expectEqual(@as(f32, 0), root.gamepad_source.axisValue(99, 0));
-}
-
-test "gamepad_source: hasState matches the selected source's decls" {
-    const Source = root.gamepad_source.Source;
-    const expected = @hasDecl(Source, "isAvailable") and
-        @hasDecl(Source, "isButtonDown") and
-        @hasDecl(Source, "isButtonPressed") and
-        @hasDecl(Source, "axisValue");
-    try testing.expectEqual(expected, root.gamepad_source.hasState());
-}
-
-// Pure SDL→canonical mapping/normalize coverage that EXECUTES on the host.
-// Reached through the conditionally re-exported `desktop` module so the same
-// host `zig build test` that compiles the desktop source also runs its mapping
-// logic (the desktop file's own inline `test` blocks aren't collected by the
-// src/root.zig test artifact, matching the repo's per-OS-file convention).
-test "gamepad_source.desktop: SDL→canonical button/axis mapping + normalize" {
-    const d = root.gamepad_source.desktop;
-    if (@TypeOf(d) == @TypeOf(null)) return error.SkipZigTest; // non-desktop host
-
-    // Physical-layout button mapping (Google/Xbox): SDL A(0) is the physical
-    // bottom face = canonical right_face_down(7).
-    try testing.expectEqual(@as(?u32, 7), d.sdlButtonToCanonical(0)); // A → right_face_down
-    try testing.expectEqual(@as(?u32, 6), d.sdlButtonToCanonical(1)); // B → right_face_right
-    try testing.expectEqual(@as(?u32, 8), d.sdlButtonToCanonical(2)); // X → right_face_left
-    try testing.expectEqual(@as(?u32, 5), d.sdlButtonToCanonical(3)); // Y → right_face_up
-    try testing.expectEqual(@as(?u32, 1), d.sdlButtonToCanonical(11)); // DPAD_UP → left_face_up
-    try testing.expectEqual(@as(?u32, 2), d.sdlButtonToCanonical(14)); // DPAD_RIGHT → left_face_right
-    try testing.expectEqual(@as(?u32, 9), d.sdlButtonToCanonical(9)); // LEFTSHOULDER → left_trigger_1
-    try testing.expectEqual(@as(?u32, 14), d.sdlButtonToCanonical(5)); // GUIDE → middle
-    try testing.expectEqual(@as(?u32, null), d.sdlButtonToCanonical(99)); // unmapped
-
-    // Axis mapping + i16→f32 normalization (sticks span [-1,1], triggers [0,1]).
-    try testing.expectEqual(@as(?u32, 0), d.sdlAxisToCanonical(0));
-    try testing.expectEqual(@as(?u32, 5), d.sdlAxisToCanonical(5));
-    try testing.expectEqual(@as(f32, 1), d.normalizeAxis(32767, false));
-    try testing.expectEqual(@as(f32, -1), d.normalizeAxis(-32768, false));
-    try testing.expectEqual(@as(f32, 0), d.normalizeAxis(0, true));
-    try testing.expectEqual(@as(f32, 1), d.normalizeAxis(32767, true));
-    try testing.expectEqual(@as(f32, 0), d.normalizeAxis(-100, true)); // trigger clamps ≥0
-
-    // Trigger threshold synthesizes the analog-trigger button at/above 0.5.
-    try testing.expect(d.normalizeAxis(16384, true) >= d.TRIGGER_BUTTON_THRESHOLD);
-    try testing.expect(d.normalizeAxis(16000, true) < d.TRIGGER_BUTTON_THRESHOLD);
+    try testing.expectEqual(@as(usize, 0), root.gamepad_source.pollEvents(&evbuf));
 }

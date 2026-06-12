@@ -27,3 +27,32 @@ jobs:
 
       - name: Run tests
         run: zig build test --summary all
+
+  # Runtime-verify the Linux gamepad source — detection AND state — against
+  # uinput-created virtual pads (core#33). This is the kernel-level analogue
+  # of labelle-assembler's gamepad-sim CI step: two simultaneous pads,
+  # hotplug, replug GUID stability, button/axis edges with canonical
+  # mapping, hat d-pad, trigger synthesis, and no cross-slot bleed.
+  # Root is required twice over: /dev/uinput to create the virtual pads,
+  # and the /dev/input/event* nodes they spawn (root:input 0640) to read
+  # state — hence the sudo with PATH preserved so the script finds zig.
+  gamepad-runtime:
+    name: Gamepad runtime check (uinput)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: '0.16.0'
+
+      - name: Install python3-evdev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-evdev
+
+      - name: Run detection + state harness
+        run: |
+          sudo modprobe uinput
+          sudo --preserve-env=PATH bash tools/run_detection_check.sh

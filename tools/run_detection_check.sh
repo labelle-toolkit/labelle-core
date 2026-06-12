@@ -18,6 +18,9 @@ zig build
 OUT=$(mktemp)
 ./zig-out/bin/evdev-probe >"$OUT" 2>&1 &
 PROBE=$!
+# Clean up the background probe + temp file on ANY exit (incl. an early `set -e`
+# abort if the feeder fails), so we never leak a running probe or a tmp file.
+trap 'kill "$PROBE" 2>/dev/null || true; rm -f "$OUT"' EXIT
 sleep 1 # let the probe arm the udev monitor before the first hotplug
 python3 tools/uinput_feeder.py
 wait "$PROBE"

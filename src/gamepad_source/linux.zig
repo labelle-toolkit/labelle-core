@@ -343,7 +343,9 @@ const axis_map = [_]AxisMap{
 /// Normalize a raw axis sample using its `input_absinfo` range: sticks to
 /// [-1, 1], triggers to [0, 1]. A degenerate range (max == min) yields 0.
 fn normalizeAxis(ai: input_absinfo, is_trigger: bool) f32 {
-    if (ai.maximum == ai.minimum) return 0;
+    // <= (not ==) so a corrupt descriptor with maximum < minimum yields a safe
+    // neutral 0 instead of an inverted/garbage value (and never divides by 0).
+    if (ai.maximum <= ai.minimum) return 0;
     const range: f32 = @floatFromInt(ai.maximum - ai.minimum);
     const v: f32 = @floatFromInt(ai.value - ai.minimum);
     const unit = v / range; // 0..1
@@ -589,7 +591,10 @@ const LinuxSource = struct {
 
     fn sampleButtons(t: *Tracked) void {
         @memset(&t.cur_buttons, false);
-        var bits: [KEY_BITMAP_BYTES]u8 = undefined;
+        // Zero-initialised: if the kernel underfills the bitmap (older/quirky
+        // drivers can write fewer bytes than KEY_BITMAP_BYTES), the untouched
+        // tail reads as "not pressed" rather than uninitialised stack garbage.
+        var bits: [KEY_BITMAP_BYTES]u8 = [_]u8{0} ** KEY_BITMAP_BYTES;
         const rc = std.os.linux.ioctl(t.fd, EVIOCGKEY_IOCTL, @intFromPtr(&bits));
         if (std.os.linux.errno(rc) != .SUCCESS) return;
         for (tracked_key_codes) |code| {
@@ -621,7 +626,9 @@ const LinuxSource = struct {
     }
 
     fn nowNs() i128 {
-        var ts: std.os.linux.timespec = undefined;
+        // Zero-init so a (practically impossible) clock_gettime failure returns
+        // 0 rather than reading an uninitialised timespec.
+        var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 0 };
         _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
         return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
     }

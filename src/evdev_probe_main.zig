@@ -42,7 +42,7 @@ fn sleepPoll() void {
 
 fn nowNs() u64 {
     if (comptime builtin.target.os.tag == .linux) {
-        var ts: std.os.linux.timespec = undefined;
+        var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 0 };
         _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
         return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
     }

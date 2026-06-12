@@ -1,10 +1,17 @@
-//! Linux gamepad **detection** source (sokol/native, headless/server).
+//! Linux gamepad source: udev/evdev **detection + state** (core#33).
 //!
-//! Detection/identity only — this file answers "what controllers are plugged
-//! in, and when do they appear/disappear?". Reading axes/buttons (semantic
-//! state) is out of scope (that lands in #250); here we only open each evdev
-//! node far enough to read its identity (`EVIOCGID`, `EVIOCGNAME`, the device
-//! capability bits) and then close it.
+//! Detection answers "what controllers are plugged in, and when do they
+//! appear/disappear?" via libudev hotplug. The state surface (`update` /
+//! `isAvailable` / `isButtonDown` / `isButtonPressed` / `axisValue`) mirrors
+//! `backends/sdl_gamepad`'s `Source` exactly — canonical raylib-compatible
+//! numbering, sticks [-1,1], triggers [0,1], synthesized analog-trigger
+//! buttons, per-slot snapshot-and-edge model — so Linux desktop gamepad can
+//! eventually run on this source with no SDL link. Each tracked pad keeps
+//! its evdev fd open; `update()` samples it per frame with one `EVIOCGKEY`
+//! bitmap ioctl plus one `EVIOCGABS` per axis (microsecond-class), and
+//! throttles the hotplug pump to ~1/s. Everything runs on the caller's
+//! thread — no background threads (wasm-class targets have none, and input
+//! belongs on the game thread).
 //!
 //! ## How it works
 //!
@@ -80,6 +87,28 @@ const FallbackSource = struct {
     }
     pub fn describe(out: []GamepadDescription) usize {
         _ = out;
+        return 0;
+    }
+    // State surface no-ops (core#33) so the file stays contract-conformant
+    // when force-referenced on non-Linux hosts.
+    pub fn update() void {}
+    pub fn isAvailable(slot: u32) bool {
+        _ = slot;
+        return false;
+    }
+    pub fn isButtonDown(slot: u32, button: u32) bool {
+        _ = slot;
+        _ = button;
+        return false;
+    }
+    pub fn isButtonPressed(slot: u32, button: u32) bool {
+        _ = slot;
+        _ = button;
+        return false;
+    }
+    pub fn axisValue(slot: u32, axis: u32) f32 {
+        _ = slot;
+        _ = axis;
         return 0;
     }
 };
@@ -171,12 +200,168 @@ fn EVIOCGNAME(comptime len: u32) u32 {
     return (2 << 30) | (@as(u32, 'E') << 8) | (0x06 << 0) | (len << 16);
 }
 
+/// Linux `struct input_absinfo` (linux/input.h). Returned by `EVIOCGABS`;
+/// `value` is the CURRENT axis position, `minimum`/`maximum`/`flat` describe
+/// the range, so one ioctl per axis yields both the sample and the
+/// normalization parameters.
+const input_absinfo = extern struct {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+};
+
+/// Key-state bitmap size for `EVIOCGKEY`: KEY_CNT (0x300) bits.
+const KEY_BITMAP_BYTES: u32 = 0x300 / 8;
+
+/// `_IOC(_IOC_READ, 'E', 0x18, len)` — current key/button state bitmap.
+const EVIOCGKEY_IOCTL: u32 = (2 << 30) | (@as(u32, 'E') << 8) | 0x18 | (KEY_BITMAP_BYTES << 16);
+
+/// `_IOR('E', 0x40 + abs, struct input_absinfo)` — per-axis state + range.
+fn EVIOCGABS(abs_code: u32) u32 {
+    return (2 << 30) | (@sizeOf(input_absinfo) << 16) | (@as(u32, 'E') << 8) | (0x40 + abs_code);
+}
+
+// ── Canonical numbering (raylib-compatible) ─────────────────────────────
+// Mirrors `backends/sdl_gamepad`'s `Button`/`Axis` exactly (core#33: the
+// Linux state surface must be interchangeable with the SDL source).
+
+pub const Button = struct {
+    pub const left_face_up: u32 = 1;
+    pub const left_face_right: u32 = 2;
+    pub const left_face_down: u32 = 3;
+    pub const left_face_left: u32 = 4;
+    pub const right_face_up: u32 = 5;
+    pub const right_face_right: u32 = 6;
+    pub const right_face_down: u32 = 7;
+    pub const right_face_left: u32 = 8;
+    pub const left_trigger_1: u32 = 9;
+    pub const left_trigger_2: u32 = 10;
+    pub const right_trigger_1: u32 = 11;
+    pub const right_trigger_2: u32 = 12;
+    pub const middle_left: u32 = 13;
+    pub const middle: u32 = 14;
+    pub const middle_right: u32 = 15;
+    pub const left_thumb: u32 = 16;
+    pub const right_thumb: u32 = 17;
+};
+
+pub const Axis = struct {
+    pub const left_x: u32 = 0;
+    pub const left_y: u32 = 1;
+    pub const right_x: u32 = 2;
+    pub const right_y: u32 = 3;
+    pub const left_trigger: u32 = 4;
+    pub const right_trigger: u32 = 5;
+};
+
+const MAX_CANONICAL_BUTTON: u32 = 17;
+const AXIS_COUNT: usize = 6;
+
+/// Trigger-axis level (normalized 0..1) at/above which the synthesized
+/// analog-trigger button reads pressed. Same constant as sdl_gamepad.
+pub const TRIGGER_BUTTON_THRESHOLD: f32 = 0.5;
+
+// ── Kernel evdev codes (linux/input-event-codes.h) ─────────────────────
+
+const KEY_BTN_SOUTH: u16 = 0x130; // geographic bottom face button
+const KEY_BTN_EAST: u16 = 0x131;
+const KEY_BTN_NORTH: u16 = 0x133;
+const KEY_BTN_WEST: u16 = 0x134;
+const KEY_BTN_TL: u16 = 0x136;
+const KEY_BTN_TR: u16 = 0x137;
+const KEY_BTN_TL2: u16 = 0x138; // digital trigger click (pads without analog)
+const KEY_BTN_TR2: u16 = 0x139;
+const KEY_BTN_SELECT: u16 = 0x13a;
+const KEY_BTN_START: u16 = 0x13b;
+const KEY_BTN_MODE: u16 = 0x13c;
+const KEY_BTN_THUMBL: u16 = 0x13d;
+const KEY_BTN_THUMBR: u16 = 0x13e;
+const KEY_BTN_DPAD_UP: u16 = 0x220;
+const KEY_BTN_DPAD_DOWN: u16 = 0x221;
+const KEY_BTN_DPAD_LEFT: u16 = 0x222;
+const KEY_BTN_DPAD_RIGHT: u16 = 0x223;
+
+const ABS_X: u32 = 0x00;
+const ABS_Y: u32 = 0x01;
+const ABS_Z: u32 = 0x02; // left trigger on xpad-class pads
+const ABS_RX: u32 = 0x03;
+const ABS_RY: u32 = 0x04;
+const ABS_RZ: u32 = 0x05; // right trigger on xpad-class pads
+const ABS_HAT0X: u32 = 0x10; // d-pad as a hat (common on real pads)
+const ABS_HAT0Y: u32 = 0x11;
+
+/// Kernel button code → canonical button. Geographic (physical-position)
+/// mapping per the Linux gamepad spec: BTN_SOUTH is the bottom face button
+/// regardless of vendor labels — the same physical-layout convention
+/// sdl_gamepad uses. Real-pad label quirks (e.g. drivers that emit
+/// NORTH/WEST swapped) are part of core#33's bare-metal checklist.
+fn keyCodeToCanonical(code: u16) ?u32 {
+    return switch (code) {
+        KEY_BTN_SOUTH => Button.right_face_down,
+        KEY_BTN_EAST => Button.right_face_right,
+        KEY_BTN_NORTH => Button.right_face_up,
+        KEY_BTN_WEST => Button.right_face_left,
+        KEY_BTN_TL => Button.left_trigger_1,
+        KEY_BTN_TR => Button.right_trigger_1,
+        KEY_BTN_TL2 => Button.left_trigger_2,
+        KEY_BTN_TR2 => Button.right_trigger_2,
+        KEY_BTN_SELECT => Button.middle_left,
+        KEY_BTN_MODE => Button.middle,
+        KEY_BTN_START => Button.middle_right,
+        KEY_BTN_THUMBL => Button.left_thumb,
+        KEY_BTN_THUMBR => Button.right_thumb,
+        KEY_BTN_DPAD_UP => Button.left_face_up,
+        KEY_BTN_DPAD_DOWN => Button.left_face_down,
+        KEY_BTN_DPAD_LEFT => Button.left_face_left,
+        KEY_BTN_DPAD_RIGHT => Button.left_face_right,
+        else => null,
+    };
+}
+
+/// Every kernel button code `update()` samples from the EVIOCGKEY bitmap.
+const tracked_key_codes = [_]u16{
+    KEY_BTN_SOUTH,  KEY_BTN_EAST,      KEY_BTN_NORTH,     KEY_BTN_WEST,
+    KEY_BTN_TL,     KEY_BTN_TR,        KEY_BTN_TL2,       KEY_BTN_TR2,
+    KEY_BTN_SELECT, KEY_BTN_START,     KEY_BTN_MODE,      KEY_BTN_THUMBL,
+    KEY_BTN_THUMBR, KEY_BTN_DPAD_UP,   KEY_BTN_DPAD_DOWN, KEY_BTN_DPAD_LEFT,
+    KEY_BTN_DPAD_RIGHT,
+};
+
+const AxisMap = struct { abs: u32, canonical: u32, is_trigger: bool };
+const axis_map = [_]AxisMap{
+    .{ .abs = ABS_X, .canonical = Axis.left_x, .is_trigger = false },
+    .{ .abs = ABS_Y, .canonical = Axis.left_y, .is_trigger = false },
+    .{ .abs = ABS_RX, .canonical = Axis.right_x, .is_trigger = false },
+    .{ .abs = ABS_RY, .canonical = Axis.right_y, .is_trigger = false },
+    .{ .abs = ABS_Z, .canonical = Axis.left_trigger, .is_trigger = true },
+    .{ .abs = ABS_RZ, .canonical = Axis.right_trigger, .is_trigger = true },
+};
+
+/// Normalize a raw axis sample using its `input_absinfo` range: sticks to
+/// [-1, 1], triggers to [0, 1]. A degenerate range (max == min) yields 0.
+fn normalizeAxis(ai: input_absinfo, is_trigger: bool) f32 {
+    if (ai.maximum == ai.minimum) return 0;
+    const range: f32 = @floatFromInt(ai.maximum - ai.minimum);
+    const v: f32 = @floatFromInt(ai.value - ai.minimum);
+    const unit = v / range; // 0..1
+    return if (is_trigger) unit else unit * 2.0 - 1.0;
+}
+
+fn bitmapHas(bits: []const u8, code: u16) bool {
+    const byte = code / 8;
+    if (byte >= bits.len) return false;
+    return (bits[byte] >> @intCast(code % 8)) & 1 == 1;
+}
+
 // ── Implementation ─────────────────────────────────────────────────────
 
 const RING_CAPACITY = 64;
 const MAX_TRACKED = 32;
 
-/// Identity of a tracked device. COPY-only.
+/// Identity + live state of a tracked device.
 const Tracked = struct {
     /// udev `sysname`, e.g. "event7" — our stable per-node key for matching
     /// the `remove` action back to the slot we assigned on `add`.
@@ -189,6 +374,17 @@ const Tracked = struct {
     unavailable_reason: gamepad.UnavailableReason = .none,
     in_use: bool = false,
 
+    /// Open evdev fd for state sampling (core#33), kept for the device's
+    /// whole tracked lifetime. -1 when the node couldn't be opened
+    /// (permission_denied etc.) — detection still works, state reads false/0.
+    fd: i32 = -1,
+    /// Snapshot-and-edge button state, canonical-indexed (sdl_gamepad's
+    /// model): `prev` is last frame's snapshot, `cur` is this frame's.
+    prev_buttons: [MAX_CANONICAL_BUTTON + 1]bool = [_]bool{false} ** (MAX_CANONICAL_BUTTON + 1),
+    cur_buttons: [MAX_CANONICAL_BUTTON + 1]bool = [_]bool{false} ** (MAX_CANONICAL_BUTTON + 1),
+    /// Normalized axis values (sticks [-1,1], triggers [0,1]).
+    axes: [AXIS_COUNT]f32 = [_]f32{0} ** AXIS_COUNT,
+
     fn sysnameSlice(self: *const Tracked) []const u8 {
         return self.sysname[0..self.sysname_len];
     }
@@ -197,6 +393,12 @@ const Tracked = struct {
         @memcpy(self.sysname[0..n], text[0..n]);
         @memset(self.sysname[n..], 0);
         self.sysname_len = @intCast(n);
+    }
+    fn closeFd(self: *Tracked) void {
+        if (self.fd >= 0) {
+            _ = std.os.linux.close(self.fd);
+            self.fd = -1;
+        }
     }
 };
 
@@ -214,7 +416,13 @@ const LinuxSource = struct {
     var ring_count: usize = 0;
 
     var tracked: [MAX_TRACKED]Tracked = [_]Tracked{.{}} ** MAX_TRACKED;
-    var next_slot: u32 = 0;
+
+    /// Monotonic timestamp of the last hotplug pump done by `update()`.
+    /// Hotplug detection is deliberately throttled there (a controller
+    /// appearing ~a second late is invisible to a player), so the steady
+    /// state per-frame cost is the state ioctls alone. `pollEvents` — the
+    /// explicit detection call — always pumps immediately.
+    var last_pump_ns: i128 = 0;
 
     var initialized: bool = false;
     var perm_hint_logged: bool = false;
@@ -258,8 +466,11 @@ const LinuxSource = struct {
         ring_head = 0;
         ring_tail = 0;
         ring_count = 0;
-        for (&tracked) |*t| t.* = .{};
-        next_slot = 0;
+        for (&tracked) |*t| {
+            t.closeFd();
+            t.* = .{};
+        }
+        last_pump_ns = 0;
         initialized = false;
     }
 
@@ -301,6 +512,118 @@ const LinuxSource = struct {
             n += 1;
         }
         return n;
+    }
+
+    // ── State surface (core#33) ────────────────────────────────────────
+    // Mirrors backends/sdl_gamepad's Source: per-frame snapshot-and-edge
+    // model, canonical raylib-compatible numbering, sticks [-1,1],
+    // triggers [0,1], synthesized analog-trigger buttons. All on the
+    // caller's thread — no background threads (wasm and friends don't
+    // have them, and input must be sampled on the game thread anyway).
+
+    /// How often `update()` pumps the udev hotplug monitor. State sampling
+    /// itself runs every call; only hotplug detection is throttled.
+    pub const HOTPLUG_PUMP_INTERVAL_NS: i128 = 1 * std.time.ns_per_s;
+
+    /// Per-frame state refresh: rotate the edge snapshots and sample every
+    /// open pad via two ioctl families — one `EVIOCGKEY` (all buttons in a
+    /// single bitmap) plus one `EVIOCGABS` per axis. ~7 microsecond-class
+    /// syscalls per connected pad per frame; pads that couldn't be opened
+    /// (permission_denied) are skipped and read as idle.
+    pub fn update() void {
+        if (!initialized) init();
+
+        const now = nowNs();
+        if (now - last_pump_ns >= HOTPLUG_PUMP_INTERVAL_NS) {
+            last_pump_ns = now;
+            pumpMonitor();
+        }
+
+        for (&tracked) |*t| {
+            if (!t.in_use) continue;
+            t.prev_buttons = t.cur_buttons;
+            if (t.fd < 0) {
+                @memset(&t.cur_buttons, false);
+                @memset(&t.axes, 0);
+                continue;
+            }
+            sampleButtons(t);
+            sampleAxes(t);
+            // Synthesized analog-trigger buttons (parity with sdl_gamepad):
+            // a trigger past the threshold also reads as its button. OR'd on
+            // top so pads that report digital BTN_TL2/TR2 keep working.
+            if (t.axes[Axis.left_trigger] >= TRIGGER_BUTTON_THRESHOLD)
+                t.cur_buttons[Button.left_trigger_2] = true;
+            if (t.axes[Axis.right_trigger] >= TRIGGER_BUTTON_THRESHOLD)
+                t.cur_buttons[Button.right_trigger_2] = true;
+        }
+    }
+
+    /// True if a readable controller occupies `slot`.
+    pub fn isAvailable(slot: u32) bool {
+        if (!initialized) init();
+        if (slot >= MAX_TRACKED) return false;
+        return tracked[slot].in_use;
+    }
+
+    /// True while canonical `button` is held on `slot` (as of the last update()).
+    pub fn isButtonDown(slot: u32, button: u32) bool {
+        if (slot >= MAX_TRACKED or button > MAX_CANONICAL_BUTTON) return false;
+        const t = &tracked[slot];
+        return t.in_use and t.cur_buttons[button];
+    }
+
+    /// True only on the update() where `button` transitioned up -> down.
+    pub fn isButtonPressed(slot: u32, button: u32) bool {
+        if (slot >= MAX_TRACKED or button > MAX_CANONICAL_BUTTON) return false;
+        const t = &tracked[slot];
+        return t.in_use and t.cur_buttons[button] and !t.prev_buttons[button];
+    }
+
+    /// Normalized canonical axis value: sticks [-1,1], triggers [0,1].
+    pub fn axisValue(slot: u32, axis: u32) f32 {
+        if (slot >= MAX_TRACKED or axis >= AXIS_COUNT) return 0;
+        const t = &tracked[slot];
+        return if (t.in_use) t.axes[axis] else 0;
+    }
+
+    fn sampleButtons(t: *Tracked) void {
+        @memset(&t.cur_buttons, false);
+        var bits: [KEY_BITMAP_BYTES]u8 = undefined;
+        const rc = std.os.linux.ioctl(t.fd, EVIOCGKEY_IOCTL, @intFromPtr(&bits));
+        if (std.os.linux.errno(rc) != .SUCCESS) return;
+        for (tracked_key_codes) |code| {
+            if (bitmapHas(&bits, code)) {
+                if (keyCodeToCanonical(code)) |canonical| t.cur_buttons[canonical] = true;
+            }
+        }
+    }
+
+    fn sampleAxes(t: *Tracked) void {
+        for (axis_map) |am| {
+            var ai: input_absinfo = undefined;
+            const rc = std.os.linux.ioctl(t.fd, EVIOCGABS(am.abs), @intFromPtr(&ai));
+            if (std.os.linux.errno(rc) != .SUCCESS) continue;
+            t.axes[am.canonical] = normalizeAxis(ai, am.is_trigger);
+        }
+        // D-pad as a hat (ABS_HAT0X/Y) — common on real pads (xpad). OR'd
+        // into the dpad canonical buttons alongside BTN_DPAD_*.
+        var hx: input_absinfo = undefined;
+        if (std.os.linux.errno(std.os.linux.ioctl(t.fd, EVIOCGABS(ABS_HAT0X), @intFromPtr(&hx))) == .SUCCESS) {
+            if (hx.value < 0) t.cur_buttons[Button.left_face_left] = true;
+            if (hx.value > 0) t.cur_buttons[Button.left_face_right] = true;
+        }
+        var hy: input_absinfo = undefined;
+        if (std.os.linux.errno(std.os.linux.ioctl(t.fd, EVIOCGABS(ABS_HAT0Y), @intFromPtr(&hy))) == .SUCCESS) {
+            if (hy.value < 0) t.cur_buttons[Button.left_face_up] = true;
+            if (hy.value > 0) t.cur_buttons[Button.left_face_down] = true;
+        }
+    }
+
+    fn nowNs() i128 {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
     }
 
     // ── internals ──────────────────────────────────────────────────────
@@ -396,17 +719,20 @@ const LinuxSource = struct {
         var name: []const u8 = "";
         var reason: gamepad.UnavailableReason = .none;
 
-        // Identity: try to open the node for EVIOCGID/EVIOCGNAME. On EACCES we
-        // fall back to udev properties (which don't need an open fd) and mark
-        // the device permission_denied so describe() can report it. With no
-        // devnode at all there's nothing to open and the node is unusable.
+        // Identity: try to open the node for EVIOCGID/EVIOCGNAME. The fd is
+        // KEPT for the device's tracked lifetime so `update()` can sample
+        // state from it (core#33) — it's closed on disconnect/deinit, or
+        // below if the slot table is full / the node is a duplicate. On
+        // EACCES we fall back to udev properties (which don't need an open
+        // fd) and mark the device permission_denied so describe() reports
+        // it; state reads stay false/0 for that pad. With no devnode at all
+        // there's nothing to open and the node is unusable.
+        var keep_fd: i32 = -1;
         const devnode = u.udev_device_get_devnode(dev);
         if (devnode) |dn| {
             const path = std.mem.span(dn);
             if (std.posix.openatZ(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0)) |fd| {
-                // std.posix.close does not exist in Zig 0.16; the evdev fd is a
-                // raw Linux fd, so close it through the linux syscall wrapper.
-                defer _ = std.os.linux.close(fd);
+                keep_fd = @intCast(fd);
                 readId(fd, &id);
                 name = readName(fd, &name_buf);
             } else |err| switch (err) {
@@ -433,20 +759,27 @@ const LinuxSource = struct {
 
         // De-dup by device identity: if another `event*` node of the same
         // physical pad is already tracked, keep the first and drop this one.
-        if (findByGuid(guid) != null) return;
+        if (findByGuid(guid) != null) {
+            if (keep_fd >= 0) _ = std.os.linux.close(keep_fd);
+            return;
+        }
 
         const slot_idx = allocSlot() orelse {
             std.log.scoped(.gamepad).warn("gamepad track table full ({d}); ignoring {s}", .{ MAX_TRACKED, sysname });
+            if (keep_fd >= 0) _ = std.os.linux.close(keep_fd);
             return;
         };
         const t = &tracked[slot_idx];
         t.* = .{};
         t.in_use = true;
         t.setSysname(sysname);
-        t.slot = next_slot;
-        next_slot +%= 1;
+        // Dense slot ids with lowest-free reuse (the table index), matching
+        // sdl_gamepad's contract — the engine queries slots 0..MAX-1, so a
+        // monotonically growing id would walk out of its query range.
+        t.slot = @intCast(slot_idx);
         t.unavailable_reason = reason;
         t.guid = guid;
+        t.fd = keep_fd;
 
         const n = @min(name.len, gamepad.NAME_CAPACITY);
         @memcpy(t.name[0..n], name[0..n]);
@@ -475,6 +808,7 @@ const LinuxSource = struct {
         };
         ev.setName(t.name[0..t.name_len]);
         pushEvent(ev);
+        t.closeFd();
         t.* = .{}; // free the slot
     }
 
@@ -670,6 +1004,42 @@ test "busTypeFromString maps udev ID_BUS strings" {
     try std.testing.expectEqual(@as(u16, 0x03), busTypeFromString("usb"));
     try std.testing.expectEqual(@as(u16, 0x05), busTypeFromString("bluetooth"));
     try std.testing.expectEqual(@as(u16, 0), busTypeFromString("i2c"));
+}
+
+test "keyCodeToCanonical: geographic face buttons + the full button set" {
+    try std.testing.expectEqual(@as(?u32, Button.right_face_down), keyCodeToCanonical(KEY_BTN_SOUTH));
+    try std.testing.expectEqual(@as(?u32, Button.right_face_right), keyCodeToCanonical(KEY_BTN_EAST));
+    try std.testing.expectEqual(@as(?u32, Button.right_face_up), keyCodeToCanonical(KEY_BTN_NORTH));
+    try std.testing.expectEqual(@as(?u32, Button.right_face_left), keyCodeToCanonical(KEY_BTN_WEST));
+    try std.testing.expectEqual(@as(?u32, Button.left_face_up), keyCodeToCanonical(KEY_BTN_DPAD_UP));
+    try std.testing.expectEqual(@as(?u32, Button.middle), keyCodeToCanonical(KEY_BTN_MODE));
+    try std.testing.expectEqual(@as(?u32, null), keyCodeToCanonical(0x100)); // BTN_0: unmapped
+    // Every tracked code maps somewhere (the sample loop relies on it).
+    for (tracked_key_codes) |code| try std.testing.expect(keyCodeToCanonical(code) != null);
+}
+
+test "normalizeAxis: sticks to [-1,1], triggers to [0,1], degenerate range to 0" {
+    const stick = input_absinfo{ .value = 32767, .minimum = -32768, .maximum = 32767, .fuzz = 0, .flat = 0, .resolution = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), normalizeAxis(stick, false), 0.001);
+    const centered = input_absinfo{ .value = 0, .minimum = -32768, .maximum = 32767, .fuzz = 0, .flat = 0, .resolution = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), normalizeAxis(centered, false), 0.001);
+    const stick_min = input_absinfo{ .value = -32768, .minimum = -32768, .maximum = 32767, .fuzz = 0, .flat = 0, .resolution = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), normalizeAxis(stick_min, false), 0.001);
+    const trig = input_absinfo{ .value = 255, .minimum = 0, .maximum = 255, .fuzz = 0, .flat = 0, .resolution = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), normalizeAxis(trig, true), 0.001);
+    const trig_rest = input_absinfo{ .value = 0, .minimum = 0, .maximum = 255, .fuzz = 0, .flat = 0, .resolution = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), normalizeAxis(trig_rest, true), 0.001);
+    const broken = input_absinfo{ .value = 7, .minimum = 5, .maximum = 5, .fuzz = 0, .flat = 0, .resolution = 0 };
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), normalizeAxis(broken, false), 0.001);
+}
+
+test "bitmapHas reads evdev key bitmaps bit-correctly" {
+    var bits = [_]u8{0} ** KEY_BITMAP_BYTES;
+    bits[KEY_BTN_SOUTH / 8] |= @as(u8, 1) << @intCast(KEY_BTN_SOUTH % 8);
+    try std.testing.expect(bitmapHas(&bits, KEY_BTN_SOUTH));
+    try std.testing.expect(!bitmapHas(&bits, KEY_BTN_EAST));
+    try std.testing.expect(!bitmapHas(&bits, 0x2ff)); // last valid code, unset
+    try std.testing.expect(!bitmapHas(bits[0..1], 0x130)); // out-of-range slice
 }
 
 test "findByGuid dedupes multiple event nodes of one physical pad" {

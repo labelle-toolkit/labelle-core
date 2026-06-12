@@ -82,4 +82,25 @@ pub fn build(b: *std.Build) void {
     // Fold the cross-compile checks into the default `test` target so CI (and
     // `zig build test`) can't go green while a per-OS file is broken.
     test_step.dependOn(check_platforms_step);
+
+    // --- Linux evdev/udev detection probe (core#33 harness) ---
+    //
+    // A tiny executable around `gamepad_source` used by
+    // `tools/run_detection_check.sh` to runtime-verify the Linux detection
+    // source against uinput-created virtual pads (works on WSL2 too — see the
+    // probe's module doc). Compiles to a no-op loop on non-Linux hosts via the
+    // dispatcher's fallback, so the install step is unconditional.
+    const probe = b.addExecutable(.{
+        .name = "evdev-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/evdev_probe_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    // libc so std.DynLib resolves libudev through real dlopen — without it
+    // Zig falls back to its minimal ELF loader, which can't load libudev.
+    // Real game binaries link libc anyway, so this matches the consumers.
+    probe.root_module.link_libc = true;
+    b.installArtifact(probe);
 }

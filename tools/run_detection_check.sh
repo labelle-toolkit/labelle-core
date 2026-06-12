@@ -43,6 +43,25 @@ expect 1 "kind=connected .*name=Virtual Pad B"
 expect 3 "kind=disconnected"
 expect 0 "^DESCRIBE"
 
+# ── State phase (core#33: update/isButtonPressed/axisValue) ────────────
+# Pad A is slot 0 (dense reuse after replug), pad B is slot 1.
+expect 1 "STATE slot=0 btn=7 pressed"   # BTN_SOUTH on A -> right_face_down
+expect 1 "STATE slot=1 btn=6 pressed"   # BTN_EAST on B -> right_face_right
+expect 1 "STATE slot=0 btn=9 pressed"   # BTN_TL held on A (simultaneous phase)
+expect 1 "STATE slot=1 btn=15 pressed"  # BTN_START on B while A holds TL
+expect 1 "STATE slot=0 btn=2 pressed"   # hat right on A -> left_face_right
+expect 1 "STATE slot=1 btn=12 pressed"  # RZ past threshold -> synthesized right_trigger_2
+expect 1 "STATE slot=0 axis=0 val=1.00" # ABS_X max on A -> +1.0
+expect 1 "STATE slot=1 axis=5 val=1.00" # ABS_RZ max on B -> 1.0
+# Cross-slot bleed must not happen: B's inputs never on slot 0 and vice versa.
+expect 0 "STATE slot=0 btn=6 "
+expect 0 "STATE slot=0 btn=15 "
+expect 0 "STATE slot=1 btn=7 "
+expect 0 "STATE slot=1 btn=9 "
+expect 0 "STATE slot=1 btn=2 "
+
+grep "^TIMING" "$OUT" || true
+
 guid_a1=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
 guid_a2=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
 guid_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')

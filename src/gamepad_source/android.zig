@@ -5,11 +5,19 @@
 //! REMOVAL / IDENTITY only (labelle-assembler#248). Button/axis *state*
 //! is a separate concern tracked by #250 — we never read it here.
 //!
-//! ## Design (JNI through sokol's ANativeActivity)
+//! ## Design (JNI through a backend-registered ANativeActivity seam)
 //!
-//! sokol exposes the running Activity via `sapp_android_get_native_activity()`
-//! (Zig: `sokol.app.androidGetNativeActivity()`), which returns an
-//! `ANativeActivity*`. From there we reach:
+//! Core does NOT link any backend symbol directly. The active backend adapter
+//! registers an `AndroidBackendContext` (see `src/android_backend.zig`) at
+//! startup; this file reaches the JNI layer exclusively through that context
+//! (labelle-core#310). The sokol backend, for example, wires the context to
+//! `sapp_android_get_native_activity()` and its `labelle_android_gamepad_*` C
+//! glue — but core never names those symbols. If no backend registers a
+//! context, the Android gamepad source is a graceful no-op (no link error, no
+//! fake stubs required from non-sokol backends).
+//!
+//! The registered `get_native_activity` returns an `ANativeActivity*`. From
+//! there the backend's glue reaches:
 //!   - `ANativeActivity.env`   → JNIEnv* (the sokol main/Looper thread)
 //!   - `ANativeActivity.clazz` → the Activity object (a Context)
 //!
@@ -42,11 +50,11 @@
 //! ## Host / cross-compile note
 //!
 //! `gamepad_source/root.zig` force-references this file and calls
-//! `pollEvents` on the *host* target for its contract test. Every JNI /
-//! `extern` reference is therefore gated behind `comptime is_android`, so on
-//! non-Android targets this file compiles to a pure `return 0` with no
-//! unresolved symbols. The `extern fn sapp_android_get_native_activity` is
-//! provided by sokol_clib at link time on the Android target only.
+//! `pollEvents` on the *host* target for its contract test. The JNI struct is
+//! gated behind `comptime is_android`, so on non-Android targets this file
+//! compiles to a pure `return 0` with no unresolved symbols. On Android the
+//! only native dependency is whatever the registered `AndroidBackendContext`
+//! provides — core declares no backend `extern`s of its own.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -54,6 +62,12 @@ const builtin = @import("builtin");
 const source = @import("root.zig");
 const GamepadEvent = source.GamepadEvent;
 const GamepadDescription = source.GamepadDescription;
+
+// Backend-agnostic seam to the Android JNI layer (labelle-core#310). The active
+// backend registers an `AndroidBackendContext`; we route every native call
+// through it instead of linking sokol's `sapp_*` / `labelle_android_gamepad_*`
+// symbols directly. No registered context → graceful no-op.
+const android_backend = @import("../android_backend.zig");
 
 /// True only when building for an Android target. Per project convention
 /// there is no `Os.Tag.android` / `isAndroid()`; detect via the abi.
@@ -195,20 +209,12 @@ const jni = if (is_android) struct {
     // struct in Zig and keeps this file ABI-robust across NDK versions.
     const JNIEnv = opaque {};
 
-    // ── Glue entry points (implemented in the assembler's C JNI file) ────
-    // These wrap the InputManager / InputDevice reflection so the Zig side
-    // stays small and ABI-stable. They are plain C functions, not JNI
-    // natives, invoked from the sokol main thread during init().
-    //
-    //   labelle_android_gamepad_init(activity) → registers the listener and
-    //       enumerates existing devices; pushes events via the callbacks
-    //       below.
-    //   labelle_android_gamepad_shutdown()     → unregisters the listener.
-    extern fn labelle_android_gamepad_init(activity: ?*const anyopaque) callconv(.c) void;
-    extern fn labelle_android_gamepad_shutdown() callconv(.c) void;
-
-    // sokol's accessor for the running Activity (provided by sokol_clib).
-    extern fn sapp_android_get_native_activity() callconv(.c) ?*const anyopaque;
+    // NB: the native glue entry points — get-native-activity, gamepad-init and
+    // gamepad-shutdown — are NOT declared as `extern` here anymore. Core reaches
+    // them through the backend-registered `AndroidBackendContext` (see
+    // `Source.init`/`deinit` and `src/android_backend.zig`), so this file names
+    // no backend symbol. The struct survives only for the JNI ABI types above,
+    // which document the layout the backend's C glue walks.
 } else struct {};
 
 // ── Callbacks invoked from the C JNI glue (Looper thread) ───────────────
@@ -251,26 +257,29 @@ export fn labelle_android_on_device_removed(device_id: i32) callconv(.c) void {
 }
 
 pub const Source = struct {
-    /// Register the InputDeviceListener and enumerate existing devices.
-    /// No-op (and never references JNI symbols) off Android.
+    /// Register the InputDeviceListener and enumerate existing devices, going
+    /// through the backend-registered `AndroidBackendContext`. No-op off
+    /// Android, and a graceful no-op on Android when no backend registered a
+    /// context (so non-sokol backends just get no gamepad, not a link error).
     pub fn init() void {
         // A plain `if (comptime !is_android) return;` would NOT stop the
-        // compiler from semantically analyzing the JNI references below on
-        // host targets (where `jni` is an empty struct). Wrap the whole
-        // platform-specific body in `if (comptime is_android)` so those
-        // symbols are only analyzed on Android.
+        // compiler from semantically analyzing the body below on host targets.
+        // Wrap the platform-specific body in `if (comptime is_android)` so it
+        // is only analyzed on Android.
         if (comptime is_android) {
-            const activity = jni.sapp_android_get_native_activity();
+            const ctx = android_backend.get() orelse return; // no backend → inert
+            const activity = ctx.get_native_activity();
             if (activity == null) return; // no Activity yet → nothing to bind
-            jni.labelle_android_gamepad_init(activity);
+            ctx.gamepad_init(activity);
         }
     }
 
-    /// Unregister the listener and drop any queued hotplug events so a later
-    /// `init` starts from a clean ring (no stale connect/disconnect deltas).
+    /// Unregister the listener (via the registered context) and drop any queued
+    /// hotplug events so a later `init` starts from a clean ring (no stale
+    /// connect/disconnect deltas).
     pub fn deinit() void {
         if (comptime is_android) {
-            jni.labelle_android_gamepad_shutdown();
+            if (android_backend.get()) |ctx| ctx.gamepad_shutdown();
         }
         // Drain regardless of target so the module-level ring never carries
         // events across a deinit/init cycle (harmless no-op on host).

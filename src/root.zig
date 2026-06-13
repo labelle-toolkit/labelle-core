@@ -16,6 +16,11 @@ pub const serde = @import("serde.zig");
 pub const flow = @import("flow.zig");
 pub const gamepad = @import("gamepad.zig");
 pub const gamepad_source = @import("gamepad_source/root.zig");
+// Backend-agnostic Android JNI seam (labelle-core#310). A backend adapter
+// registers its Android gamepad glue here at startup via
+// `core.registerAndroidBackend(...)`; core's Android gamepad source routes
+// through it instead of linking sokol's `sapp_*` symbols directly.
+pub const android_backend = @import("android_backend.zig");
 
 // Re-exports
 pub const HookDispatcher = dispatcher.HookDispatcher;
@@ -42,6 +47,11 @@ pub const GamepadDescription = gamepad.GamepadDescription;
 pub const GamepadSourceClass = gamepad.SourceClass;
 pub const GamepadTypeHint = gamepad.TypeHint;
 pub const GamepadUnavailableReason = gamepad.UnavailableReason;
+
+// Android backend seam re-exports (core#310) so engine + backend adapters can
+// call `core.registerAndroidBackend(ctx)` without reaching into the submodule.
+pub const AndroidBackendContext = android_backend.AndroidBackendContext;
+pub const registerAndroidBackend = android_backend.registerAndroidBackend;
 
 pub const GuiInterface = gui.GuiInterface;
 pub const StubGui = gui.StubGui;

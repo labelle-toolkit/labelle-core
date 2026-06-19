@@ -29,6 +29,9 @@ const GamePosition = root.GamePosition;
 const ScreenPosition = root.ScreenPosition;
 const gameToScreen = root.gameToScreen;
 const screenToGame = root.screenToGame;
+const YAxis = root.YAxis;
+const toScreenY = root.toScreenY;
+const screenToLogicalY = root.screenToLogicalY;
 
 const SimplePayload = union(enum) {
     ping: u32,
@@ -770,6 +773,37 @@ test "gameToScreen and screenToGame are inverse operations" {
     const screen_y = gameToScreen(original_y, screen_height);
     const round_trip = screenToGame(screen_y, screen_height);
     try testing.expectApproxEqAbs(original_y, round_trip, 0.001);
+}
+
+test "toScreenY: .up flips (matches the renderer's height - y)" {
+    // .up = bottom-origin: y=0 -> screen height, y=height -> 0.
+    try testing.expectEqual(@as(f32, 600.0), toScreenY(.up, 0, 600));
+    try testing.expectEqual(@as(f32, 0.0), toScreenY(.up, 600, 600));
+    try testing.expectEqual(@as(f32, 500.0), toScreenY(.up, 100, 600));
+    // .up must agree with the existing renderer flip / gameToScreen exactly.
+    try testing.expectEqual(gameToScreen(123.0, 600.0), toScreenY(.up, 123.0, 600.0));
+}
+
+test "toScreenY: .down is identity (matches screen space)" {
+    try testing.expectEqual(@as(f32, 0.0), toScreenY(.down, 0, 600));
+    try testing.expectEqual(@as(f32, 600.0), toScreenY(.down, 600, 600));
+    try testing.expectEqual(@as(f32, 100.0), toScreenY(.down, 100, 600));
+}
+
+test "screenToLogicalY: .up flips, .down is identity" {
+    try testing.expectEqual(@as(f32, 600.0), screenToLogicalY(.up, 0, 600));
+    try testing.expectEqual(@as(f32, 0.0), screenToLogicalY(.up, 600, 600));
+    try testing.expectEqual(@as(f32, 250.0), screenToLogicalY(.down, 250, 600));
+}
+
+test "toScreenY/screenToLogicalY are inverse for both axes" {
+    const height: f32 = 600;
+    inline for (.{ YAxis.up, YAxis.down }) |axis| {
+        for ([_]f32{ 0, 1, 100, 250.5, 599, 600 }) |y| {
+            const screen = toScreenY(axis, y, height);
+            try testing.expectEqual(y, screenToLogicalY(axis, screen, height));
+        }
+    }
 }
 
 test "GamePosition.toScreen and ScreenPosition.toGame" {

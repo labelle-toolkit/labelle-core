@@ -104,6 +104,13 @@ pub const ScreenPosition = coordinates.ScreenPosition;
 pub const gameToScreen = coordinates.gameToScreen;
 pub const screenToGame = coordinates.screenToGame;
 
+// Y-axis convention (RFC labelle-engine#638) — the single source of truth for
+// "which way is +Y" that gfx#276 and engine#639 route every vertical flip
+// through. `toScreenY` is the canonical flip; `screenToLogicalY` its inverse.
+pub const YAxis = coordinates.YAxis;
+pub const toScreenY = coordinates.toScreenY;
+pub const screenToLogicalY = coordinates.screenToLogicalY;
+
 // RFC-FLOW-VOCABULARY phase 1: comptime contracts for plugin-extensible
 // flow nodes. No discovery walk here — that lives in labelle-assembler.
 pub const FlowNode = flow.FlowNode;

@@ -67,11 +67,11 @@ pub fn toScreenY(axis: YAxis, y: f32, height: f32) f32 {
 ///
 /// - `.up`   = `logical_y = height - screen_y`.
 /// - `.down` = `logical_y = screen_y` (identity).
+///
+/// The flip is an involution (its own inverse) for both conventions, so this
+/// is exactly `toScreenY` — delegating keeps the two from ever drifting apart.
 pub fn screenToLogicalY(axis: YAxis, screen_y: f32, height: f32) f32 {
-    return switch (axis) {
-        .up => height - screen_y,
-        .down => screen_y,
-    };
+    return toScreenY(axis, screen_y, height);
 }
 
 /// A position explicitly tagged as being in game (Y-up) coordinate space.

@@ -73,6 +73,44 @@ pub fn VideoInterface(comptime Impl: type) type {
 /// every call is a no-op (matches a backend without video).
 pub const StubVideo = struct {};
 
+/// Prefab-placeable video: attach to an entity and the engine's video system
+/// plays the clip at that entity's world position — so a project can author
+/// multiple videos in multiple places (in-world screens, billboards) purely via
+/// prefabs/scenes, the same way it places sprites.
+///
+/// The path is stored inline so the component owns it (null-terminated for the
+/// backend's `open`), avoiding a dangling slice into scene data. The runtime
+/// `handle` is filled lazily by the system on first tick.
+pub const VideoComponent = struct {
+    path_buf: [192]u8 = [_]u8{0} ** 192,
+    path_len: u16 = 0,
+    /// Runtime player handle (0 = not opened yet). System-managed.
+    handle: u32 = 0,
+    /// Draw size in the entity's coordinate space; the dest rect is anchored at
+    /// the entity's Position. 0 means "use the video's native pixel size".
+    width: f32 = 0,
+    height: f32 = 0,
+    /// Skip drawing without closing the player (e.g. off-screen culling).
+    visible: bool = true,
+
+    pub fn init(path: []const u8, width: f32, height: f32) VideoComponent {
+        var c = VideoComponent{ .width = width, .height = height };
+        c.setPath(path);
+        return c;
+    }
+
+    pub fn setPath(self: *VideoComponent, p: []const u8) void {
+        const n = @min(p.len, self.path_buf.len - 1);
+        @memcpy(self.path_buf[0..n], p[0..n]);
+        self.path_buf[n] = 0;
+        self.path_len = @intCast(n);
+    }
+
+    pub fn pathZ(self: *const VideoComponent) [:0]const u8 {
+        return self.path_buf[0..self.path_len :0];
+    }
+};
+
 test "StubVideo: unsupported, all calls no-op" {
     const std = @import("std");
     const V = VideoInterface(StubVideo);
@@ -83,6 +121,17 @@ test "StubVideo: unsupported, all calls no-op" {
     V.update(1, 0.016); // no-op
     V.draw(1, 0, 0, 100, 100); // no-op
     V.close(1); // no-op
+}
+
+test "VideoComponent: owns a null-terminated path" {
+    const std = @import("std");
+    var c = VideoComponent.init("assets/intro.mp4", 320, 240);
+    try std.testing.expectEqualStrings("assets/intro.mp4", c.pathZ());
+    try std.testing.expectEqual(@as(f32, 320), c.width);
+    try std.testing.expectEqual(@as(u32, 0), c.handle);
+    try std.testing.expect(c.visible);
+    c.setPath("b.mp4");
+    try std.testing.expectEqualStrings("b.mp4", c.pathZ());
 }
 
 test "VideoInterface: a video-capable impl is dispatched" {

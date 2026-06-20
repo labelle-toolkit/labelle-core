@@ -69,6 +69,7 @@ pub const VisualType = render.VisualType;
 
 pub const VideoInterface = video.VideoInterface;
 pub const StubVideo = video.StubVideo;
+pub const VideoComponent = video.VideoComponent;
 
 pub const LogLevel = log.LogLevel;
 pub const LogSinkInterface = log.LogSinkInterface;

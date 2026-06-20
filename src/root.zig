@@ -7,6 +7,7 @@ pub const input = @import("input.zig");
 pub const gui = @import("gui.zig");
 pub const gizmos = @import("gizmos.zig");
 pub const render = @import("render.zig");
+pub const video = @import("video.zig");
 pub const hierarchy = @import("hierarchy.zig");
 pub const prefab = @import("prefab.zig");
 pub const log = @import("log.zig");
@@ -65,6 +66,9 @@ pub const StubGizmos = gizmos.StubGizmos;
 pub const RenderInterface = render.RenderInterface;
 pub const StubRender = render.StubRender;
 pub const VisualType = render.VisualType;
+
+pub const VideoInterface = video.VideoInterface;
+pub const StubVideo = video.StubVideo;
 
 pub const LogLevel = log.LogLevel;
 pub const LogSinkInterface = log.LogSinkInterface;

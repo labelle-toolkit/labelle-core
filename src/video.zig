@@ -20,9 +20,11 @@ pub fn VideoInterface(comptime Impl: type) type {
     return struct {
         pub const Implementation = Impl;
 
-        /// True iff the active backend can actually decode + play video. Game
-        /// code should branch on this (intro vs. skip/splash) rather than
-        /// assuming `open` succeeds.
+        /// True iff the active backend implements video at all (it declares
+        /// `openVideo`) — a compile-time capability probe, NOT a guarantee that a
+        /// given clip decodes: `open` can still return 0 at runtime (missing
+        /// asset, unsupported codec). Game code branches on this to pick the path
+        /// (intro vs. skip/splash) and must still check `open`'s returned handle.
         pub inline fn supported() bool {
             return @hasDecl(Impl, "openVideo");
         }

@@ -49,14 +49,15 @@ pub fn VideoInterface(comptime Impl: type) type {
             if (@hasDecl(Impl, "drawVideo")) Impl.drawVideo(id, x, y, w, h);
         }
 
-        /// Draw the current frame stretched edge-to-edge over the whole
-        /// framebuffer — a background/backdrop. The backend owns the surface
-        /// dimensions and the no-pillarbox fill, so callers don't compute a rect.
-        /// Falls back to `draw` semantics only if the backend lacks the dedicated
-        /// path; render it in screen space (before the camera pass) for a fixed
-        /// backdrop.
-        pub inline fn drawFullscreen(id: u32) void {
-            if (@hasDecl(Impl, "drawVideoFullscreen")) Impl.drawVideoFullscreen(id);
+        /// Draw the current frame over the whole framebuffer — a background /
+        /// backdrop — using `fit` to reconcile a video whose aspect doesn't match
+        /// the screen (see `VideoFit`). The backend owns the surface dimensions
+        /// and the fit math, so callers don't compute a rect. Render it in screen
+        /// space (before the camera pass) for a fixed backdrop.
+        pub inline fn drawFullscreen(id: u32, fit: VideoFit) void {
+            // Pass the enum's tag so a backend in a module that doesn't import
+            // core (e.g. the bgfx gfx module) needn't name the type.
+            if (@hasDecl(Impl, "drawVideoFullscreen")) Impl.drawVideoFullscreen(id, @intFromEnum(fit));
         }
 
         /// True while the stream still has frames (false once it has ended). A
@@ -81,6 +82,20 @@ pub fn VideoInterface(comptime Impl: type) type {
         }
     };
 }
+
+/// How a fullscreen/background video reconciles its aspect ratio with the
+/// screen when they don't match (like CSS `object-fit`). The `u8` tags are the
+/// wire contract with the backend's `drawVideoFullscreen` — keep the order.
+pub const VideoFit = enum(u8) {
+    /// Fill the screen exactly, ignoring aspect — distorts a mismatched video.
+    stretch = 0,
+    /// Fill the screen preserving aspect, cropping the overflow — no bars, no
+    /// distortion. The right default for a background that must cover the screen.
+    cover = 1,
+    /// Fit the whole video inside the screen preserving aspect — letterbox /
+    /// pillarbox bars, nothing cropped.
+    contain = 2,
+};
 
 /// Stub video for engine-only testing — no decls, so `supported()` is false and
 /// every call is a no-op (matches a backend without video).
@@ -107,6 +122,9 @@ pub const VideoComponent = struct {
     /// Fill the whole screen (a background/backdrop), ignoring Position + size.
     /// Render it in screen space (before the camera pass) for a fixed backdrop.
     fullscreen: bool = false,
+    /// How a `fullscreen` video reconciles a mismatched aspect ratio. `cover`
+    /// (crop to fill, no distortion) is the sensible background default.
+    fit: VideoFit = .cover,
     /// Skip drawing without closing the player (e.g. off-screen culling).
     visible: bool = true,
 
@@ -114,7 +132,8 @@ pub const VideoComponent = struct {
         return .{ .path = path, .width = width, .height = height };
     }
 
-    /// A full-screen background video (e.g. an animated backdrop).
+    /// A full-screen background video (e.g. an animated backdrop). `cover` fit by
+    /// default so a mismatched clip crops to fill instead of distorting.
     pub fn background(path: []const u8) VideoComponent {
         return .{ .path = path, .fullscreen = true };
     }
@@ -129,7 +148,7 @@ test "StubVideo: unsupported, all calls no-op" {
     try std.testing.expectEqual(@as(u32, 0), V.dimensions(1).w);
     V.update(1, 0.016); // no-op
     V.draw(1, 0, 0, 100, 100); // no-op
-    V.drawFullscreen(1); // no-op
+    V.drawFullscreen(1, .cover); // no-op
     V.close(1); // no-op
 }
 
@@ -141,12 +160,14 @@ test "VideoComponent: holds a JSON-friendly path" {
     try std.testing.expectEqual(@as(u32, 0), c.handle);
     try std.testing.expect(c.visible);
     try std.testing.expect(!c.fullscreen);
+    try std.testing.expectEqual(VideoFit.cover, c.fit); // default fit
     // Defaults are sane for a bare struct (what the jsonc bridge fills field-wise).
     const d = VideoComponent{ .path = "ad", .width = 0, .height = 0 };
     try std.testing.expect(d.visible and d.handle == 0);
-    // background() is a full-screen backdrop.
+    // background() is a full-screen, cover-fit backdrop.
     const bg = VideoComponent.background("loop");
     try std.testing.expect(bg.fullscreen);
+    try std.testing.expectEqual(VideoFit.cover, bg.fit);
     try std.testing.expectEqualStrings("loop", bg.path);
 }
 

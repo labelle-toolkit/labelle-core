@@ -52,11 +52,15 @@ expect 0 "^DESCRIBE"
 # passed only when A happened to enumerate first). Pad A is replugged and
 # densely reuses its freed slot, so its latest connect slot is the one live
 # during the state phase; Pad B connects once.
-guid_a1=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
-guid_a2=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
-guid_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
-slot_a=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*slot=\([0-9]*\).*/\1/')
-slot_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*slot=\([0-9]*\).*/\1/')
+# `|| true` on each extraction: under `set -eo pipefail` a grep that finds no
+# match (e.g. a pad failed to connect) would otherwise abort the whole script
+# before the assertions run — a connect failure should surface as a readable
+# FAIL from the slot-distinct/GUID checks below, not an abrupt exit.
+guid_a1=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/' || true)
+guid_a2=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/' || true)
+guid_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/' || true)
+slot_a=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*slot=\([0-9]*\).*/\1/' || true)
+slot_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*slot=\([0-9]*\).*/\1/' || true)
 
 # ── State phase (core#33: update/isButtonPressed/axisValue) ────────────
 # Assertions keyed to each pad's resolved slot ($slot_a / $slot_b), not a

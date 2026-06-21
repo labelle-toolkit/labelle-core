@@ -27,9 +27,12 @@ pub fn VideoInterface(comptime Impl: type) type {
             return @hasDecl(Impl, "openVideo");
         }
 
-        /// Open a video by resource path (a backend asset / file path). Returns a
-        /// handle, or 0 on failure or when video is unsupported.
-        pub inline fn open(path: [:0]const u8) u32 {
+        /// Open a video by resource name/path (a backend asset key or file path).
+        /// `[]const u8` (not sentinel-terminated) so it accepts a `VideoComponent`
+        /// path deserialized straight from a scene/JSON string; the backend
+        /// null-terminates internally if its asset API needs it. Returns a handle,
+        /// or 0 on failure or when video is unsupported.
+        pub inline fn open(path: []const u8) u32 {
             if (@hasDecl(Impl, "openVideo")) return Impl.openVideo(path);
             return 0;
         }
@@ -76,14 +79,14 @@ pub const StubVideo = struct {};
 /// Prefab-placeable video: attach to an entity and the engine's video system
 /// plays the clip at that entity's world position — so a project can author
 /// multiple videos in multiple places (in-world screens, billboards) purely via
-/// prefabs/scenes, the same way it places sprites.
-///
-/// The path is stored inline so the component owns it (null-terminated for the
-/// backend's `open`), avoiding a dangling slice into scene data. The runtime
-/// `handle` is filled lazily by the system on first tick.
+/// prefabs/scenes, the same way it places sprites. The runtime `handle` is
+/// filled lazily by the system on first tick.
 pub const VideoComponent = struct {
-    path_buf: [192]u8 = [_]u8{0} ** 192,
-    path_len: u16 = 0,
+    /// Backend resource name/path (e.g. "intro"). Borrowed like `Sprite`'s
+    /// `sprite_name`: it must outlive the component — a string literal in code,
+    /// or scene-owned data when declared in a prefab/scene. A plain `[]const u8`
+    /// so the jsonc bridge deserializes it straight from a JSON string.
+    path: []const u8 = "",
     /// Runtime player handle (0 = not opened yet). System-managed.
     handle: u32 = 0,
     /// Draw size in the entity's coordinate space; the dest rect is anchored at
@@ -94,20 +97,7 @@ pub const VideoComponent = struct {
     visible: bool = true,
 
     pub fn init(path: []const u8, width: f32, height: f32) VideoComponent {
-        var c = VideoComponent{ .width = width, .height = height };
-        c.setPath(path);
-        return c;
-    }
-
-    pub fn setPath(self: *VideoComponent, p: []const u8) void {
-        const n = @min(p.len, self.path_buf.len - 1);
-        @memcpy(self.path_buf[0..n], p[0..n]);
-        self.path_buf[n] = 0;
-        self.path_len = @intCast(n);
-    }
-
-    pub fn pathZ(self: *const VideoComponent) [:0]const u8 {
-        return self.path_buf[0..self.path_len :0];
+        return .{ .path = path, .width = width, .height = height };
     }
 };
 
@@ -123,22 +113,23 @@ test "StubVideo: unsupported, all calls no-op" {
     V.close(1); // no-op
 }
 
-test "VideoComponent: owns a null-terminated path" {
+test "VideoComponent: holds a JSON-friendly path" {
     const std = @import("std");
-    var c = VideoComponent.init("assets/intro.mp4", 320, 240);
-    try std.testing.expectEqualStrings("assets/intro.mp4", c.pathZ());
+    const c = VideoComponent.init("intro", 320, 240);
+    try std.testing.expectEqualStrings("intro", c.path);
     try std.testing.expectEqual(@as(f32, 320), c.width);
     try std.testing.expectEqual(@as(u32, 0), c.handle);
     try std.testing.expect(c.visible);
-    c.setPath("b.mp4");
-    try std.testing.expectEqualStrings("b.mp4", c.pathZ());
+    // Defaults are sane for a bare struct (what the jsonc bridge fills field-wise).
+    const d = VideoComponent{ .path = "ad", .width = 0, .height = 0 };
+    try std.testing.expect(d.visible and d.handle == 0);
 }
 
 test "VideoInterface: a video-capable impl is dispatched" {
     const std = @import("std");
     const FakeBackend = struct {
         var opened: u32 = 0;
-        pub fn openVideo(_: [:0]const u8) u32 {
+        pub fn openVideo(_: []const u8) u32 {
             return 7;
         }
         pub fn updateVideo(_: u32, _: f32) void {

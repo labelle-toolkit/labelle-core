@@ -46,30 +46,41 @@ expect 1 "kind=connected .*name=Virtual Pad B"
 expect 3 "kind=disconnected"
 expect 0 "^DESCRIBE"
 
+# Resolve each pad's ACTUAL slot from its connect event. Two SIMULTANEOUSLY
+# created pads race through udev enumeration, so Pad A is NOT guaranteed slot 0 —
+# keying the state assertions to a hardcoded slot made this check flaky (it
+# passed only when A happened to enumerate first). Pad A is replugged and
+# densely reuses its freed slot, so its latest connect slot is the one live
+# during the state phase; Pad B connects once.
+# `|| true` on each extraction: under `set -eo pipefail` a grep that finds no
+# match (e.g. a pad failed to connect) would otherwise abort the whole script
+# before the assertions run — a connect failure should surface as a readable
+# FAIL from the slot-distinct/GUID checks below, not an abrupt exit.
+guid_a1=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/' || true)
+guid_a2=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/' || true)
+guid_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/' || true)
+slot_a=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*slot=\([0-9]*\).*/\1/' || true)
+slot_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*slot=\([0-9]*\).*/\1/' || true)
+
 # ── State phase (core#33: update/isButtonPressed/axisValue) ────────────
-# Pad A is slot 0 (dense reuse after replug), pad B is slot 1.
-expect 1 "STATE slot=0 btn=7 pressed"   # BTN_SOUTH on A -> right_face_down
-expect 1 "STATE slot=1 btn=6 pressed"   # BTN_EAST on B -> right_face_right
-expect 1 "STATE slot=0 btn=9 pressed"   # BTN_TL held on A (simultaneous phase)
-expect 1 "STATE slot=1 btn=15 pressed"  # BTN_START on B while A holds TL
-expect 1 "STATE slot=0 btn=2 pressed"   # hat right on A -> left_face_right
-expect 1 "STATE slot=1 btn=12 pressed"  # RZ past threshold -> synthesized right_trigger_2
-expect 1 "STATE slot=0 axis=0 val=1.00" # ABS_X max on A -> +1.0
-expect 1 "STATE slot=1 axis=5 val=1.00" # ABS_RZ max on B -> 1.0
-# Cross-slot bleed must not happen: B's inputs never on slot 0 and vice versa.
-expect 0 "STATE slot=0 btn=6 "
-expect 0 "STATE slot=0 btn=15 "
-expect 0 "STATE slot=1 btn=7 "
-expect 0 "STATE slot=1 btn=9 "
-expect 0 "STATE slot=1 btn=2 "
+# Assertions keyed to each pad's resolved slot ($slot_a / $slot_b), not a
+# hardcoded 0/1 — order-independent.
+expect 1 "STATE slot=$slot_a btn=7 pressed"   # BTN_SOUTH on A -> right_face_down
+expect 1 "STATE slot=$slot_b btn=6 pressed"   # BTN_EAST on B -> right_face_right
+expect 1 "STATE slot=$slot_a btn=9 pressed"   # BTN_TL held on A (simultaneous phase)
+expect 1 "STATE slot=$slot_b btn=15 pressed"  # BTN_START on B while A holds TL
+expect 1 "STATE slot=$slot_a btn=2 pressed"   # hat right on A -> left_face_right
+expect 1 "STATE slot=$slot_b btn=12 pressed"  # RZ past threshold -> synthesized right_trigger_2
+expect 1 "STATE slot=$slot_a axis=0 val=1.00" # ABS_X max on A -> +1.0
+expect 1 "STATE slot=$slot_b axis=5 val=1.00" # ABS_RZ max on B -> 1.0
+# Cross-slot bleed must not happen: B's inputs never on A's slot and vice versa.
+expect 0 "STATE slot=$slot_a btn=6 "
+expect 0 "STATE slot=$slot_a btn=15 "
+expect 0 "STATE slot=$slot_b btn=7 "
+expect 0 "STATE slot=$slot_b btn=9 "
+expect 0 "STATE slot=$slot_b btn=2 "
 
 grep "^TIMING" "$OUT" || true
-
-guid_a1=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
-guid_a2=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | tail -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
-guid_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*guid=\([0-9a-f]*\).*/\1/')
-slot_a=$(grep "kind=connected" "$OUT" | grep "Virtual Pad A" | head -1 | sed 's/.*slot=\([0-9]*\).*/\1/')
-slot_b=$(grep "kind=connected" "$OUT" | grep "Virtual Pad B" | head -1 | sed 's/.*slot=\([0-9]*\).*/\1/')
 
 if [ "$guid_a1" = "$guid_a2" ]; then
   echo "OK: replug GUID stable ($guid_a1)"

@@ -76,6 +76,12 @@ pub fn VideoInterface(comptime Impl: type) type {
             return .{ .w = 0, .h = 0 };
         }
 
+        /// Restart playback from the beginning (for looping). No-op if the
+        /// backend can't seek/restart its decoder.
+        pub inline fn replay(id: u32) void {
+            if (@hasDecl(Impl, "replayVideo")) Impl.replayVideo(id);
+        }
+
         /// Release the player and its decoder/texture/audio.
         pub inline fn close(id: u32) void {
             if (@hasDecl(Impl, "closeVideo")) Impl.closeVideo(id);
@@ -125,6 +131,13 @@ pub const VideoComponent = struct {
     /// How a `fullscreen` video reconciles a mismatched aspect ratio. `cover`
     /// (crop to fill, no distortion) is the sensible background default.
     fit: VideoFit = .cover,
+    /// Repeat from the start on end (true) vs play once then stop and fire the
+    /// `engine__video_finished` event (false — e.g. an intro that transitions
+    /// the scene when it ends).
+    loop: bool = true,
+    /// Set by the video system once a play-once clip has ended, so the finished
+    /// event fires exactly once. Not authored — leave default in prefabs.
+    finished: bool = false,
     /// Skip drawing without closing the player (e.g. off-screen culling).
     visible: bool = true,
 
@@ -133,9 +146,15 @@ pub const VideoComponent = struct {
     }
 
     /// A full-screen background video (e.g. an animated backdrop). `cover` fit by
-    /// default so a mismatched clip crops to fill instead of distorting.
+    /// default so a mismatched clip crops to fill instead of distorting; loops.
     pub fn background(path: []const u8) VideoComponent {
         return .{ .path = path, .fullscreen = true };
+    }
+
+    /// A full-screen, play-once intro that fires `engine__video_finished` when it
+    /// ends — wire a flow/script to that event to transition the scene.
+    pub fn intro(path: []const u8) VideoComponent {
+        return .{ .path = path, .fullscreen = true, .loop = false };
     }
 };
 
@@ -149,6 +168,7 @@ test "StubVideo: unsupported, all calls no-op" {
     V.update(1, 0.016); // no-op
     V.draw(1, 0, 0, 100, 100); // no-op
     V.drawFullscreen(1, .cover); // no-op
+    V.replay(1); // no-op
     V.close(1); // no-op
 }
 
@@ -161,6 +181,10 @@ test "VideoComponent: holds a JSON-friendly path" {
     try std.testing.expect(c.visible);
     try std.testing.expect(!c.fullscreen);
     try std.testing.expectEqual(VideoFit.cover, c.fit); // default fit
+    try std.testing.expect(c.loop and !c.finished); // loops by default
+    // intro() is a play-once full-screen clip.
+    const it = VideoComponent.intro("opening");
+    try std.testing.expect(it.fullscreen and !it.loop);
     // Defaults are sane for a bare struct (what the jsonc bridge fills field-wise).
     const d = VideoComponent{ .path = "ad", .width = 0, .height = 0 };
     try std.testing.expect(d.visible and d.handle == 0);

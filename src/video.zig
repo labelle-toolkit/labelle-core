@@ -1,0 +1,224 @@
+/// Comptime-validated video interface (Flying-Platform/flying-platform-labelle#549).
+///
+/// Lets the engine and game scripts play decoded video through the active
+/// backend without depending on any backend or codec. The assembler fills the
+/// `Impl` slot at build time with the backend's video implementation (e.g. the
+/// bgfx backend's `VideoBackend`, wrapping its AMediaCodec/ffmpeg decoders +
+/// dynamic-texture `VideoPlayer`).
+///
+/// Video is an **optional capability**: unlike `AudioInterface`, it requires NO
+/// decls — every method is `@hasDecl`-gated and degrades to a no-op. So a
+/// backend that doesn't implement video (raylib/sokol today) still satisfies the
+/// interface; callers probe `supported()` (true iff the backend can open video)
+/// and otherwise skip the intro / show a static splash.
+///
+/// Handle model mirrors `AudioInterface`'s music streams: `open` returns an
+/// opaque `u32` id (0 = failure / unsupported), and the backend owns the player
+/// pool behind it. Per frame the game calls `update(id, dt)` (decode + upload +
+/// A/V sync) then `draw(id, dest)`; `close(id)` releases it.
+pub fn VideoInterface(comptime Impl: type) type {
+    return struct {
+        pub const Implementation = Impl;
+
+        /// True iff the active backend implements video at all (it declares
+        /// `openVideo`) — a compile-time capability probe, NOT a guarantee that a
+        /// given clip decodes: `open` can still return 0 at runtime (missing
+        /// asset, unsupported codec). Game code branches on this to pick the path
+        /// (intro vs. skip/splash) and must still check `open`'s returned handle.
+        pub inline fn supported() bool {
+            return @hasDecl(Impl, "openVideo");
+        }
+
+        /// Open a video by resource name/path (a backend asset key or file path).
+        /// `[]const u8` (not sentinel-terminated) so it accepts a `VideoComponent`
+        /// path deserialized straight from a scene/JSON string; the backend
+        /// null-terminates internally if its asset API needs it. Returns a handle,
+        /// or 0 on failure or when video is unsupported.
+        pub inline fn open(path: []const u8) u32 {
+            if (@hasDecl(Impl, "openVideo")) return Impl.openVideo(path);
+            return 0;
+        }
+
+        /// Advance playback by `dt` seconds: decode the due frame, upload it to
+        /// the GPU, and keep audio/video in sync. Call once per frame.
+        pub inline fn update(id: u32, dt: f32) void {
+            if (@hasDecl(Impl, "updateVideo")) Impl.updateVideo(id, dt);
+        }
+
+        /// Draw the current frame into the destination rect (screen-space, in the
+        /// engine's design coordinates — the backend maps to the surface).
+        pub inline fn draw(id: u32, x: f32, y: f32, w: f32, h: f32) void {
+            if (@hasDecl(Impl, "drawVideo")) Impl.drawVideo(id, x, y, w, h);
+        }
+
+        /// Draw the current frame over the whole framebuffer — a background /
+        /// backdrop — using `fit` to reconcile a video whose aspect doesn't match
+        /// the screen (see `VideoFit`). The backend owns the surface dimensions
+        /// and the fit math, so callers don't compute a rect. Render it in screen
+        /// space (before the camera pass) for a fixed backdrop.
+        pub inline fn drawFullscreen(id: u32, fit: VideoFit) void {
+            // Pass the enum's tag so a backend in a module that doesn't import
+            // core (e.g. the bgfx gfx module) needn't name the type.
+            if (@hasDecl(Impl, "drawVideoFullscreen")) Impl.drawVideoFullscreen(id, @intFromEnum(fit));
+        }
+
+        /// True while the stream still has frames (false once it has ended). A
+        /// non-looping intro uses this to know when to hand off to the game.
+        pub inline fn isPlaying(id: u32) bool {
+            if (@hasDecl(Impl, "isVideoPlaying")) return Impl.isVideoPlaying(id);
+            return false;
+        }
+
+        /// Pixel dimensions of the video, or `.{ 0, 0 }` if unknown/unsupported.
+        pub inline fn dimensions(id: u32) struct { w: u32, h: u32 } {
+            if (@hasDecl(Impl, "videoDimensions")) {
+                const d = Impl.videoDimensions(id);
+                return .{ .w = d.w, .h = d.h };
+            }
+            return .{ .w = 0, .h = 0 };
+        }
+
+        /// Restart playback from the beginning (for looping). No-op if the
+        /// backend can't seek/restart its decoder.
+        pub inline fn replay(id: u32) void {
+            if (@hasDecl(Impl, "replayVideo")) Impl.replayVideo(id);
+        }
+
+        /// Release the player and its decoder/texture/audio.
+        pub inline fn close(id: u32) void {
+            if (@hasDecl(Impl, "closeVideo")) Impl.closeVideo(id);
+        }
+    };
+}
+
+/// How a fullscreen/background video reconciles its aspect ratio with the
+/// screen when they don't match (like CSS `object-fit`). The `u8` tags are the
+/// wire contract with the backend's `drawVideoFullscreen` — keep the order.
+pub const VideoFit = enum(u8) {
+    /// Fill the screen exactly, ignoring aspect — distorts a mismatched video.
+    stretch = 0,
+    /// Fill the screen preserving aspect, cropping the overflow — no bars, no
+    /// distortion. The right default for a background that must cover the screen.
+    cover = 1,
+    /// Fit the whole video inside the screen preserving aspect — letterbox /
+    /// pillarbox bars, nothing cropped.
+    contain = 2,
+};
+
+/// Stub video for engine-only testing — no decls, so `supported()` is false and
+/// every call is a no-op (matches a backend without video).
+pub const StubVideo = struct {};
+
+/// Prefab-placeable video: attach to an entity and the engine's video system
+/// plays the clip at that entity's world position — so a project can author
+/// multiple videos in multiple places (in-world screens, billboards) purely via
+/// prefabs/scenes, the same way it places sprites. The runtime `handle` is
+/// filled lazily by the system on first tick.
+pub const VideoComponent = struct {
+    /// Backend resource name/path (e.g. "intro"). Borrowed like `Sprite`'s
+    /// `sprite_name`: it must outlive the component — a string literal in code,
+    /// or scene-owned data when declared in a prefab/scene. A plain `[]const u8`
+    /// so the jsonc bridge deserializes it straight from a JSON string.
+    path: []const u8 = "",
+    /// Runtime player handle (0 = not opened yet). System-managed.
+    handle: u32 = 0,
+    /// Draw size in the entity's coordinate space; the dest rect is anchored at
+    /// the entity's Position. 0 means "use the video's native pixel size".
+    /// Ignored when `fullscreen` is set.
+    width: f32 = 0,
+    height: f32 = 0,
+    /// Fill the whole screen (a background/backdrop), ignoring Position + size.
+    /// Render it in screen space (before the camera pass) for a fixed backdrop.
+    fullscreen: bool = false,
+    /// How a `fullscreen` video reconciles a mismatched aspect ratio. `cover`
+    /// (crop to fill, no distortion) is the sensible background default.
+    fit: VideoFit = .cover,
+    /// Repeat from the start on end (true) vs play once then stop and fire the
+    /// `engine__video_finished` event (false — e.g. an intro that transitions
+    /// the scene when it ends).
+    loop: bool = true,
+    /// Set by the video system once a play-once clip has ended, so the finished
+    /// event fires exactly once. Not authored — leave default in prefabs.
+    finished: bool = false,
+    /// Skip drawing without closing the player (e.g. off-screen culling).
+    visible: bool = true,
+
+    pub fn init(path: []const u8, width: f32, height: f32) VideoComponent {
+        return .{ .path = path, .width = width, .height = height };
+    }
+
+    /// A full-screen background video (e.g. an animated backdrop). `cover` fit by
+    /// default so a mismatched clip crops to fill instead of distorting; loops.
+    pub fn background(path: []const u8) VideoComponent {
+        return .{ .path = path, .fullscreen = true };
+    }
+
+    /// A full-screen, play-once intro that fires `engine__video_finished` when it
+    /// ends — wire a flow/script to that event to transition the scene.
+    pub fn intro(path: []const u8) VideoComponent {
+        return .{ .path = path, .fullscreen = true, .loop = false };
+    }
+};
+
+test "StubVideo: unsupported, all calls no-op" {
+    const std = @import("std");
+    const V = VideoInterface(StubVideo);
+    try std.testing.expect(!V.supported());
+    try std.testing.expectEqual(@as(u32, 0), V.open("x"));
+    try std.testing.expect(!V.isPlaying(1));
+    try std.testing.expectEqual(@as(u32, 0), V.dimensions(1).w);
+    V.update(1, 0.016); // no-op
+    V.draw(1, 0, 0, 100, 100); // no-op
+    V.drawFullscreen(1, .cover); // no-op
+    V.replay(1); // no-op
+    V.close(1); // no-op
+}
+
+test "VideoComponent: holds a JSON-friendly path" {
+    const std = @import("std");
+    const c = VideoComponent.init("intro", 320, 240);
+    try std.testing.expectEqualStrings("intro", c.path);
+    try std.testing.expectEqual(@as(f32, 320), c.width);
+    try std.testing.expectEqual(@as(u32, 0), c.handle);
+    try std.testing.expect(c.visible);
+    try std.testing.expect(!c.fullscreen);
+    try std.testing.expectEqual(VideoFit.cover, c.fit); // default fit
+    try std.testing.expect(c.loop and !c.finished); // loops by default
+    // intro() is a play-once full-screen clip.
+    const it = VideoComponent.intro("opening");
+    try std.testing.expect(it.fullscreen and !it.loop);
+    // Defaults are sane for a bare struct (what the jsonc bridge fills field-wise).
+    const d = VideoComponent{ .path = "ad", .width = 0, .height = 0 };
+    try std.testing.expect(d.visible and d.handle == 0);
+    // background() is a full-screen, cover-fit backdrop.
+    const bg = VideoComponent.background("loop");
+    try std.testing.expect(bg.fullscreen);
+    try std.testing.expectEqual(VideoFit.cover, bg.fit);
+    try std.testing.expectEqualStrings("loop", bg.path);
+}
+
+test "VideoInterface: a video-capable impl is dispatched" {
+    const std = @import("std");
+    const FakeBackend = struct {
+        var opened: u32 = 0;
+        pub fn openVideo(_: []const u8) u32 {
+            return 7;
+        }
+        pub fn updateVideo(_: u32, _: f32) void {
+            opened += 1;
+        }
+        pub fn isVideoPlaying(_: u32) bool {
+            return true;
+        }
+        pub fn videoDimensions(_: u32) struct { w: u32, h: u32 } {
+            return .{ .w = 320, .h = 240 };
+        }
+    };
+    const V = VideoInterface(FakeBackend);
+    try std.testing.expect(V.supported());
+    try std.testing.expectEqual(@as(u32, 7), V.open("intro"));
+    V.update(7, 0.016);
+    try std.testing.expectEqual(@as(u32, 1), FakeBackend.opened);
+    try std.testing.expect(V.isPlaying(7));
+    try std.testing.expectEqual(@as(u32, 320), V.dimensions(7).w);
+}

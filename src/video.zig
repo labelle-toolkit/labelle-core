@@ -49,6 +49,16 @@ pub fn VideoInterface(comptime Impl: type) type {
             if (@hasDecl(Impl, "drawVideo")) Impl.drawVideo(id, x, y, w, h);
         }
 
+        /// Draw the current frame stretched edge-to-edge over the whole
+        /// framebuffer — a background/backdrop. The backend owns the surface
+        /// dimensions and the no-pillarbox fill, so callers don't compute a rect.
+        /// Falls back to `draw` semantics only if the backend lacks the dedicated
+        /// path; render it in screen space (before the camera pass) for a fixed
+        /// backdrop.
+        pub inline fn drawFullscreen(id: u32) void {
+            if (@hasDecl(Impl, "drawVideoFullscreen")) Impl.drawVideoFullscreen(id);
+        }
+
         /// True while the stream still has frames (false once it has ended). A
         /// non-looping intro uses this to know when to hand off to the game.
         pub inline fn isPlaying(id: u32) bool {
@@ -91,13 +101,22 @@ pub const VideoComponent = struct {
     handle: u32 = 0,
     /// Draw size in the entity's coordinate space; the dest rect is anchored at
     /// the entity's Position. 0 means "use the video's native pixel size".
+    /// Ignored when `fullscreen` is set.
     width: f32 = 0,
     height: f32 = 0,
+    /// Fill the whole screen (a background/backdrop), ignoring Position + size.
+    /// Render it in screen space (before the camera pass) for a fixed backdrop.
+    fullscreen: bool = false,
     /// Skip drawing without closing the player (e.g. off-screen culling).
     visible: bool = true,
 
     pub fn init(path: []const u8, width: f32, height: f32) VideoComponent {
         return .{ .path = path, .width = width, .height = height };
+    }
+
+    /// A full-screen background video (e.g. an animated backdrop).
+    pub fn background(path: []const u8) VideoComponent {
+        return .{ .path = path, .fullscreen = true };
     }
 };
 
@@ -110,6 +129,7 @@ test "StubVideo: unsupported, all calls no-op" {
     try std.testing.expectEqual(@as(u32, 0), V.dimensions(1).w);
     V.update(1, 0.016); // no-op
     V.draw(1, 0, 0, 100, 100); // no-op
+    V.drawFullscreen(1); // no-op
     V.close(1); // no-op
 }
 
@@ -120,9 +140,14 @@ test "VideoComponent: holds a JSON-friendly path" {
     try std.testing.expectEqual(@as(f32, 320), c.width);
     try std.testing.expectEqual(@as(u32, 0), c.handle);
     try std.testing.expect(c.visible);
+    try std.testing.expect(!c.fullscreen);
     // Defaults are sane for a bare struct (what the jsonc bridge fills field-wise).
     const d = VideoComponent{ .path = "ad", .width = 0, .height = 0 };
     try std.testing.expect(d.visible and d.handle == 0);
+    // background() is a full-screen backdrop.
+    const bg = VideoComponent.background("loop");
+    try std.testing.expect(bg.fullscreen);
+    try std.testing.expectEqualStrings("loop", bg.path);
 }
 
 test "VideoInterface: a video-capable impl is dispatched" {

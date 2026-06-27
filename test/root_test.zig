@@ -1559,3 +1559,57 @@ test "gamepad_source: selected platform drains 0 events by default" {
     defer root.gamepad_source.deinit();
     try testing.expectEqual(@as(usize, 0), root.gamepad_source.pollEvents(&evbuf));
 }
+
+// ── Render backend contract (relocated from labelle-gfx, labelle-assembler#387) ──
+
+const Backend = root.Backend;
+const MockBackend = root.MockBackend;
+const missingBackendDecls = root.missingBackendDecls;
+
+test "assertBackend: complete impl accepted, incomplete impl reported" {
+    // The reference impl satisfies the contract → no missing decls.
+    try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(MockBackend).len);
+
+    // A deliberately-incomplete impl (only one type decl) → reported, not silent.
+    const Incomplete = struct {
+        pub const Texture = struct {};
+    };
+    const missing = comptime missingBackendDecls(Incomplete);
+    try testing.expect(missing.len > 0);
+    // Texture is present; Color (a required type) is among those reported.
+    var saw_color = false;
+    inline for (missing) |name| {
+        if (std.mem.eql(u8, name, "Color")) saw_color = true;
+    }
+    try testing.expect(saw_color);
+}
+
+test "Backend: loadTextureFromMemory diverts compressed blobs past the CPU decoder" {
+    // #341: a backend exposing isCompressed/uploadCompressed gets compressed
+    // blobs uploaded as-is; everything else takes the decode path unchanged.
+    const B = Backend(MockBackend);
+
+    // Sentinel-"MOCK" blob → uploadCompressed (sentinel 4096×4096), no decode.
+    const compressed = try B.loadTextureFromMemory("astc", "MOCK\x00\x00\x00\x00payload");
+    try testing.expectEqual(@as(i32, 4096), compressed.width);
+
+    // Ordinary blob → decodeImage + uploadTexture (the 1×1 mock stub).
+    const decoded = try B.loadTextureFromMemory("png", "ordinary-non-compressed-bytes");
+    try testing.expectEqual(@as(i32, 1), decoded.width);
+}
+
+test "Backend: compressedDims reads dims from a compressed blob without decoding" {
+    // The async catalog adapter probes header dims via the namespace-level
+    // wrapper; the named CompressedDims type unifies the backend's anonymous result.
+    const B = Backend(MockBackend);
+
+    // Sentinel-"MOCK" blob → mock reports its sentinel 4096×4096 dims.
+    const dims = B.compressedDims("MOCK\x00\x00\x00\x00payload");
+    try testing.expect(dims != null);
+    try testing.expectEqual(@as(u32, 4096), dims.?.width);
+    try testing.expectEqual(@as(u32, 4096), dims.?.height);
+    try testing.expectEqual(B.CompressedDims, @TypeOf(dims.?));
+
+    // Non-compressed blob → null (no dims to read without decoding).
+    try testing.expectEqual(@as(?B.CompressedDims, null), B.compressedDims("ordinary-bytes"));
+}

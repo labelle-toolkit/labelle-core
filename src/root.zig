@@ -7,6 +7,10 @@ pub const input = @import("input.zig");
 pub const gui = @import("gui.zig");
 pub const gizmos = @import("gizmos.zig");
 pub const render = @import("render.zig");
+// The render backend contract — the 8th comptime contract, relocated from
+// labelle-gfx (labelle-assembler#387). gfx + engine now alias these types.
+pub const backend_contract = @import("backend_contract.zig");
+pub const mock_backend = @import("mock_backend.zig");
 pub const video = @import("video.zig");
 pub const hierarchy = @import("hierarchy.zig");
 pub const prefab = @import("prefab.zig");
@@ -66,6 +70,19 @@ pub const StubGizmos = gizmos.StubGizmos;
 pub const RenderInterface = render.RenderInterface;
 pub const StubRender = render.StubRender;
 pub const VisualType = render.VisualType;
+
+// Render backend contract (relocated from labelle-gfx, labelle-assembler#387).
+pub const Backend = backend_contract.Backend;
+pub const assertBackend = backend_contract.assertBackend;
+pub const missingBackendDecls = backend_contract.missingBackendDecls;
+pub const DecodedImage = backend_contract.DecodedImage;
+pub const DecodedFont = backend_contract.DecodedFont;
+pub const FontBakeParams = backend_contract.FontBakeParams;
+pub const CodepointRange = backend_contract.CodepointRange;
+pub const Glyph = backend_contract.Glyph;
+pub const CodepointEntry = backend_contract.CodepointEntry;
+pub const KernPair = backend_contract.KernPair;
+pub const MockBackend = mock_backend.MockBackend;
 
 pub const VideoInterface = video.VideoInterface;
 pub const StubVideo = video.StubVideo;

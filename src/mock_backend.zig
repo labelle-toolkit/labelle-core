@@ -433,7 +433,7 @@ pub const MockBackend = struct {
     /// the mock uses a `"MOCK"` sentinel so it only diverts blobs the tests
     /// explicitly mark compressed — ordinary decode-path tests are unaffected.
     pub fn isCompressed(data: []const u8) bool {
-        return data.len >= 4 and std.mem.eql(u8, data[0..4], "MOCK");
+        return std.mem.startsWith(u8, data, "MOCK");
     }
 
     /// Stub compressed upload: returns a texture with sentinel 4096×4096 dims

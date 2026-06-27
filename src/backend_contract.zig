@@ -166,6 +166,10 @@ pub const required_color_decls = [_][]const u8{
 pub fn missingBackendDecls(comptime Impl: type) []const []const u8 {
     comptime {
         var missing: []const []const u8 = &.{};
+        // Plain `for` (not `inline for`): this whole block is already a
+        // `comptime {}` scope, so the loop is comptime-evaluated and `name` is
+        // comptime in each iteration; `inline` here is redundant and a Zig 0.16
+        // compile error.
         for (required_type_decls ++ required_fn_decls ++ required_color_decls) |name| {
             if (!@hasDecl(Impl, name)) missing = missing ++ [_][]const u8{name};
         }
@@ -209,9 +213,11 @@ pub fn Backend(comptime Impl: type) type {
         pub const Camera2D = Impl.Camera2D;
 
         /// Image dimensions of a GPU-compressed blob, read from its header
-        /// without decoding. Named (not anonymous) so the type unifies across
-        /// declaration sites — a backend's own `compressedDims` result coerces
-        /// cleanly into this when returned through the wrapper.
+        /// without decoding. Named (not anonymous) so the type is stable across
+        /// declaration sites — the `compressedDims` wrapper below **field-maps**
+        /// a backend's own anonymous `{ width, height }` result into this; it
+        /// does NOT rely on struct coercion (two distinct anonymous structs do
+        /// not coerce — see the wrapper's note).
         pub const CompressedDims = struct { width: u32, height: u32 };
 
         pub const white = Impl.white;

@@ -10,6 +10,7 @@ pub const render = @import("render.zig");
 // The render backend contract — the 8th comptime contract, relocated from
 // labelle-gfx (labelle-assembler#387). gfx + engine now alias these types.
 pub const backend_contract = @import("backend_contract.zig");
+pub const window_contract = @import("window_contract.zig");
 pub const mock_backend = @import("mock_backend.zig");
 pub const video = @import("video.zig");
 pub const hierarchy = @import("hierarchy.zig");
@@ -47,6 +48,12 @@ pub const StubInput = input.StubInput;
 pub const assertInput = input.assertInput;
 pub const missingInputDecls = input.missingInputDecls;
 pub const required_input_decls = input.required_input_decls;
+
+pub const Window = window_contract.Window;
+pub const assertWindow = window_contract.assertWindow;
+pub const missingWindowDecls = window_contract.missingWindowDecls;
+pub const required_window_decls = window_contract.required_window_decls;
+pub const StubWindow = window_contract.StubWindow;
 
 // Gamepad event contract (core#18) — COPY-only value types crossing the
 // hotplug ring buffer, plus the per-OS source skeleton.

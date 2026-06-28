@@ -44,6 +44,9 @@ pub const StubAudio = audio.StubAudio;
 
 pub const InputInterface = input.InputInterface;
 pub const StubInput = input.StubInput;
+pub const assertInput = input.assertInput;
+pub const missingInputDecls = input.missingInputDecls;
+pub const required_input_decls = input.required_input_decls;
 
 // Gamepad event contract (core#18) — COPY-only value types crossing the
 // hotplug ring buffer, plus the per-OS source skeleton.

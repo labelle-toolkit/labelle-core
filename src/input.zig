@@ -8,6 +8,50 @@ pub const GamepadSourceClass = gamepad.SourceClass;
 pub const GamepadTypeHint = gamepad.TypeHint;
 pub const GamepadUnavailableReason = gamepad.UnavailableReason;
 
+// ── Input contract (formalized — mirrors backend_contract.zig) ──────────────
+//
+// The duck-typed `@hasDecl` checks `InputInterface` made inline, lifted into the
+// same shape the render `Backend` contract uses: a required-decls array + a
+// `missingInputDecls` query + an `assertInput` gate. Input is intentionally MORE
+// permissive than render — only the keyboard core is required; mouse/touch/
+// gamepad/gesture stay OPTIONAL (a headless or remote-only backend declares
+// none, and `InputInterface`'s `@hasDecl` fallbacks return 0/false).
+
+/// The minimum every input backend must declare. Kept deliberately small — the
+/// rest of the surface degrades gracefully via the `@hasDecl` fallbacks below.
+pub const required_input_decls = [_][]const u8{ "isKeyDown", "isKeyPressed" };
+
+/// Names of required decls `Impl` is missing, or an empty slice if it satisfies
+/// the contract. `assertInput` wraps this with `@compileError`; tests call it
+/// directly to assert acceptance/rejection without a compile failure. Mirrors
+/// `backend_contract.missingBackendDecls`.
+pub fn missingInputDecls(comptime Impl: type) []const []const u8 {
+    comptime {
+        var missing: []const []const u8 = &.{};
+        // Plain `for`: already a `comptime {}` scope, so `name` is comptime each
+        // iteration (`inline` would be a redundant Zig 0.16 error — see
+        // backend_contract.missingBackendDecls).
+        for (required_input_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_][]const u8{name};
+        }
+        return missing;
+    }
+}
+
+/// Fail loudly at comptime if `Impl` doesn't satisfy the input contract, naming
+/// every missing decl. The formal replacement for the duck-typed `@hasDecl`
+/// checks `InputInterface` made inline. Mirrors `backend_contract.assertBackend`.
+pub fn assertInput(comptime Impl: type) void {
+    comptime {
+        const missing = missingInputDecls(Impl);
+        if (missing.len != 0) {
+            var msg: []const u8 = "Input impl does not satisfy the input contract — missing decl(s):";
+            for (missing) |name| msg = msg ++ "\n  - " ++ name;
+            @compileError(msg);
+        }
+    }
+}
+
 /// Comptime-validated input interface.
 /// The assembler provides the concrete Impl (raylib, sokol, etc.).
 /// Both engine and plugins use this for zero-cost dispatch.
@@ -17,10 +61,7 @@ pub const GamepadUnavailableReason = gamepad.UnavailableReason;
 /// Callers should use `coordinates.screenToGame` to convert these to game
 /// coordinates (Y-up) before using them in game logic.
 pub fn InputInterface(comptime Impl: type) type {
-    comptime {
-        if (!@hasDecl(Impl, "isKeyDown")) @compileError("Input impl must define 'isKeyDown'");
-        if (!@hasDecl(Impl, "isKeyPressed")) @compileError("Input impl must define 'isKeyPressed'");
-    }
+    comptime assertInput(Impl);
 
     return struct {
         pub const Implementation = Impl;

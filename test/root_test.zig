@@ -1566,6 +1566,39 @@ const Backend = root.Backend;
 const MockBackend = root.MockBackend;
 const missingBackendDecls = root.missingBackendDecls;
 
+test "assertInput: complete impl accepted, incomplete impl reported" {
+    // The reference stub satisfies the contract → no missing decls.
+    try testing.expectEqual(@as(usize, 0), comptime root.missingInputDecls(root.StubInput).len);
+
+    // Input is permissive: a keyboard-only impl (no mouse/touch/gamepad) still
+    // satisfies the contract — those degrade via InputInterface's fallbacks.
+    const KeyboardOnly = struct {
+        pub fn isKeyDown(_: u32) bool {
+            return false;
+        }
+        pub fn isKeyPressed(_: u32) bool {
+            return false;
+        }
+    };
+    try testing.expectEqual(@as(usize, 0), comptime root.missingInputDecls(KeyboardOnly).len);
+    // And it instantiates through the interface (assertInput passes).
+    _ = root.InputInterface(KeyboardOnly);
+
+    // Missing a required decl (isKeyPressed) → reported, not silent.
+    const Incomplete = struct {
+        pub fn isKeyDown(_: u32) bool {
+            return false;
+        }
+    };
+    const missing = comptime root.missingInputDecls(Incomplete);
+    try testing.expect(missing.len > 0);
+    var saw_pressed = false;
+    inline for (missing) |name| {
+        if (std.mem.eql(u8, name, "isKeyPressed")) saw_pressed = true;
+    }
+    try testing.expect(saw_pressed);
+}
+
 test "assertBackend: complete impl accepted, incomplete impl reported" {
     // The reference impl satisfies the contract → no missing decls.
     try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(MockBackend).len);

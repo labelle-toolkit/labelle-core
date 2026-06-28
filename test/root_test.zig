@@ -1566,6 +1566,58 @@ const Backend = root.Backend;
 const MockBackend = root.MockBackend;
 const missingBackendDecls = root.missingBackendDecls;
 
+test "assertWindow: required core accepted; loop vs callback capability-gated" {
+    // The reference stub satisfies the required core → no missing decls.
+    try testing.expectEqual(@as(usize, 0), comptime root.missingWindowDecls(root.StubWindow).len);
+
+    // StubWindow declares no shouldQuit → it's a callback-model window; the
+    // interface still instantiates and ownsLoop()/canScreenshot() report false.
+    const CallbackW = root.Window(root.StubWindow);
+    try testing.expect(!CallbackW.ownsLoop());
+    try testing.expect(!CallbackW.canScreenshot());
+    try testing.expect(!CallbackW.shouldQuit()); // fallback: keep running
+
+    // A loop-model window adds shouldQuit + a screenshot path → capabilities flip.
+    const LoopW = struct {
+        pub fn width() i32 {
+            return 0;
+        }
+        pub fn height() i32 {
+            return 0;
+        }
+        pub fn frameDuration() f64 {
+            return 0;
+        }
+        pub fn requestQuit() void {}
+        pub fn shouldQuit() bool {
+            return true;
+        }
+        pub fn takeScreenshot(_: [:0]const u8) void {}
+    };
+    const W = root.Window(LoopW);
+    try testing.expect(W.ownsLoop());
+    try testing.expect(W.canScreenshot());
+    try testing.expect(W.shouldQuit());
+
+    // Missing a required core decl (frameDuration) → reported, not silent.
+    const Incomplete = struct {
+        pub fn width() i32 {
+            return 0;
+        }
+        pub fn height() i32 {
+            return 0;
+        }
+        pub fn requestQuit() void {}
+    };
+    const missing = comptime root.missingWindowDecls(Incomplete);
+    try testing.expect(missing.len > 0);
+    var saw_fd = false;
+    inline for (missing) |name| {
+        if (std.mem.eql(u8, name, "frameDuration")) saw_fd = true;
+    }
+    try testing.expect(saw_fd);
+}
+
 test "assertInput: complete impl accepted, incomplete impl reported" {
     // The reference stub satisfies the contract → no missing decls.
     try testing.expectEqual(@as(usize, 0), comptime root.missingInputDecls(root.StubInput).len);

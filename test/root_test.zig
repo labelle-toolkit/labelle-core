@@ -1669,6 +1669,132 @@ test "assertBackend: complete impl accepted, incomplete impl reported" {
     try testing.expect(saw_color);
 }
 
+// ── Contract versioning (labelle-assembler#453) ─────────────────────────────
+//
+// FOUNDATION only: these assert the per-contract / per-sub-surface version
+// constants exist, are reachable through the public API, and are `1`. The
+// assembler-side `N == M` emit is a deferred follow-up (needs a core release +
+// pin bump) and is intentionally NOT tested here.
+
+test "contract versions: all constants are reachable and equal 1" {
+    try testing.expectEqual(@as(u32, 1), root.DRAW_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.LOADER_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.BACKEND_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.WINDOW_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.INPUT_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.AUDIO_PLAYBACK_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.AUDIO_LOADER_CONTRACT_VERSION);
+
+    // Types are u32 (a comptime_int would silently coerce elsewhere).
+    try testing.expectEqual(u32, @TypeOf(root.BACKEND_CONTRACT_VERSION));
+}
+
+test "render sub-surface split: draw_fn_decls + loader_fn_decls partition required_fn_decls" {
+    // required_fn_decls is exactly the concatenation — no overlap, no gap.
+    try testing.expectEqual(
+        root.draw_fn_decls.len + root.loader_fn_decls.len,
+        root.required_fn_decls.len,
+    );
+
+    // No decl appears in both sub-surfaces (disjoint).
+    inline for (root.draw_fn_decls) |d| {
+        inline for (root.loader_fn_decls) |l| {
+            try testing.expect(!std.mem.eql(u8, d, l));
+        }
+    }
+
+    // Every decl in each sub-surface classifies back to that sub-surface, and
+    // the aggregate is exactly draw ++ loader in order (no gap).
+    inline for (root.draw_fn_decls, 0..) |name, i| {
+        try testing.expectEqual(root.RenderSubSurface.draw, comptime root.subSurfaceOf(name));
+        try testing.expect(std.mem.eql(u8, name, root.required_fn_decls[i]));
+    }
+    inline for (root.loader_fn_decls, 0..) |name, j| {
+        try testing.expectEqual(root.RenderSubSurface.loader, comptime root.subSurfaceOf(name));
+        try testing.expect(std.mem.eql(u8, name, root.required_fn_decls[root.draw_fn_decls.len + j]));
+    }
+}
+
+test "missingBackendDeclsBySubSurface: classifies a missing draw decl vs a missing loader decl" {
+    // A deliberately-incomplete impl: has every required decl EXCEPT one draw
+    // decl (drawTriangle) and one loader decl (decodeImage). The tagged report
+    // must place each under the right sub-surface.
+    // Local color type under an unambiguous name (the file already has a
+    // file-level `const Color`, so a container decl named `Color` cannot be
+    // *referenced* by that bare name inside the struct — alias it instead).
+    const RGBA = struct { r: u8 = 0, g: u8 = 0, b: u8 = 0, a: u8 = 0 };
+    const Incomplete = struct {
+        // Required types.
+        pub const Texture = struct {};
+        pub const Color = RGBA;
+        pub const Rectangle = struct {};
+        pub const Vector2 = struct {};
+        pub const Camera2D = struct {};
+        // Required color constants.
+        pub const white: RGBA = .{};
+        pub const black: RGBA = .{};
+        pub const red: RGBA = .{};
+        pub const green: RGBA = .{};
+        pub const blue: RGBA = .{};
+        pub const transparent: RGBA = .{};
+        // Draw decls — drawTriangle intentionally OMITTED.
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: RGBA) void {}
+        pub fn drawRectangleRec(_: Rectangle, _: RGBA) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: RGBA) void {}
+        pub fn drawPolygon(_: []const Vector2, _: RGBA) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: RGBA) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: RGBA) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 0;
+        }
+        pub fn getScreenHeight() i32 {
+            return 0;
+        }
+        pub fn screenToWorld(p: Vector2, _: Camera2D) Vector2 {
+            return p;
+        }
+        pub fn worldToScreen(p: Vector2, _: Camera2D) Vector2 {
+            return p;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+        // Loader decls — decodeImage intentionally OMITTED.
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{};
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{};
+        }
+        pub fn unloadTexture(_: Texture) void {}
+    };
+
+    const missing = comptime root.missingBackendDeclsBySubSurface(Incomplete);
+    // Exactly the two we omitted are missing.
+    try testing.expectEqual(@as(usize, 2), missing.len);
+
+    var draw_ss: ?root.RenderSubSurface = null;
+    var loader_ss: ?root.RenderSubSurface = null;
+    inline for (missing) |m| {
+        if (std.mem.eql(u8, m.name, "drawTriangle")) draw_ss = m.sub_surface;
+        if (std.mem.eql(u8, m.name, "decodeImage")) loader_ss = m.sub_surface;
+    }
+    try testing.expectEqual(root.RenderSubSurface.draw, draw_ss.?);
+    try testing.expectEqual(root.RenderSubSurface.loader, loader_ss.?);
+
+    // Aggregate view is unchanged (same names, order-preserving: draw before loader).
+    const flat = comptime root.missingBackendDecls(Incomplete);
+    try testing.expectEqual(@as(usize, 2), flat.len);
+    try testing.expect(std.mem.eql(u8, flat[0], "drawTriangle"));
+    try testing.expect(std.mem.eql(u8, flat[1], "decodeImage"));
+
+    // subSurfaceOf classifies known decls directly.
+    try testing.expectEqual(root.RenderSubSurface.type, comptime root.subSurfaceOf("Texture"));
+    try testing.expectEqual(root.RenderSubSurface.color, comptime root.subSurfaceOf("white"));
+    try testing.expectEqual(root.RenderSubSurface.draw, comptime root.subSurfaceOf("drawTexturePro"));
+    try testing.expectEqual(root.RenderSubSurface.loader, comptime root.subSurfaceOf("uploadTexture"));
+}
+
 test "Backend: loadTextureFromMemory diverts compressed blobs past the CPU decoder" {
     // #341: a backend exposing isCompressed/uploadCompressed gets compressed
     // blobs uploaded as-is; everything else takes the decode path unchanged.

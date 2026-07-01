@@ -1690,7 +1690,12 @@ test "contract versions: all constants are reachable and equal 1" {
 }
 
 test "render sub-surface split: draw_fn_decls + loader_fn_decls partition required_fn_decls" {
-    // required_fn_decls is exactly the concatenation — no overlap, no gap.
+    @setEvalBranchQuota(10000); // nested comptime membership + subSurfaceOf walks
+    // The two sub-surfaces partition the aggregate as a SET — same count, no
+    // overlap, and every aggregate decl lands in exactly one sub-surface.
+    // (Positional equality is NOT asserted: required_fn_decls preserves the
+    // ORIGINAL flat order, in which the loader decls are interleaved between
+    // the draw decls, not appended — see the golden-order test below.)
     try testing.expectEqual(
         root.draw_fn_decls.len + root.loader_fn_decls.len,
         root.required_fn_decls.len,
@@ -1703,15 +1708,50 @@ test "render sub-surface split: draw_fn_decls + loader_fn_decls partition requir
         }
     }
 
-    // Every decl in each sub-surface classifies back to that sub-surface, and
-    // the aggregate is exactly draw ++ loader in order (no gap).
-    inline for (root.draw_fn_decls, 0..) |name, i| {
+    // Every sub-surface decl classifies back to that sub-surface and is a
+    // member of the aggregate.
+    inline for (root.draw_fn_decls) |name| {
         try testing.expectEqual(root.RenderSubSurface.draw, comptime root.subSurfaceOf(name));
-        try testing.expect(std.mem.eql(u8, name, root.required_fn_decls[i]));
+        var found = false;
+        inline for (root.required_fn_decls) |agg| {
+            if (std.mem.eql(u8, name, agg)) found = true;
+        }
+        try testing.expect(found);
     }
-    inline for (root.loader_fn_decls, 0..) |name, j| {
+    inline for (root.loader_fn_decls) |name| {
         try testing.expectEqual(root.RenderSubSurface.loader, comptime root.subSurfaceOf(name));
-        try testing.expect(std.mem.eql(u8, name, root.required_fn_decls[root.draw_fn_decls.len + j]));
+        var found = false;
+        inline for (root.required_fn_decls) |agg| {
+            if (std.mem.eql(u8, name, agg)) found = true;
+        }
+        try testing.expect(found);
+    }
+
+    // And every aggregate decl classifies as draw OR loader (total, no stray).
+    inline for (root.required_fn_decls) |name| {
+        const ss = comptime root.subSurfaceOf(name);
+        try testing.expect(ss == .draw or ss == .loader);
+    }
+}
+
+test "required_fn_decls preserves the original flat order (byte-identical diagnostics)" {
+    // The aggregate order is load-bearing: `missingBackendDecls` walks it, so
+    // `assertBackend`'s compile-error text is byte-identical to the pre-split
+    // implementation only if this order never drifts. The loader decls
+    // (loadTexture/decodeImage/uploadTexture/unloadTexture) MUST sit between
+    // `drawText` and `beginMode2D`. Freezing the exact sequence here makes any
+    // reordering (e.g. a `draw_fn_decls ++ loader_fn_decls` regression that
+    // tails the loader decls) a loud, obvious test failure.
+    const expected = [_][]const u8{
+        "drawTexturePro", "drawRectangleRec", "drawCircle",      "drawTriangle",
+        "drawPolygon",    "drawLine",         "drawText",        "loadTexture",
+        "decodeImage",    "uploadTexture",    "unloadTexture",   "beginMode2D",
+        "endMode2D",      "getScreenWidth",   "getScreenHeight", "screenToWorld",
+        "worldToScreen",  "setDesignSize",
+    };
+    try testing.expectEqual(expected.len, root.required_fn_decls.len);
+    inline for (expected, 0..) |name, i| {
+        try testing.expect(std.mem.eql(u8, name, root.required_fn_decls[i]));
     }
 }
 
@@ -1903,6 +1943,69 @@ test "conformance: render suite passes for a minimal (no-capability) backend" {
         pub fn setDesignSize(_: i32, _: i32) void {}
     };
     try conformance.runRenderSuite(Minimal);
+}
+
+test "conformance: partial font backend is rejected (all-or-nothing capability)" {
+    // A backend that declares SOME font decls but not the full set is a
+    // half-implemented surface. The render suite must FAIL it rather than treat
+    // it as "not a font backend" and silently pass (the pre-fix behavior).
+    const PartialFont = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1 };
+        const C = @This().Color;
+
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 1, .height = 1 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{ .id = 2 };
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(p: Vector2, _: Camera2D) Vector2 {
+            return p;
+        }
+        pub fn worldToScreen(p: Vector2, _: Camera2D) Vector2 {
+            return p;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+
+        // Partial font surface: declares decodeFont only — missing FontAtlas,
+        // uploadFontAtlas, unloadFontAtlas.
+        pub fn decodeFont(_: [:0]const u8, _: []const u8, _: root.FontBakeParams, _: std.mem.Allocator) !root.DecodedFont {
+            return error.FontBackendNotImplemented;
+        }
+    };
+    try testing.expectError(error.IncompleteFontCapability, conformance.runRenderSuite(PartialFont));
 }
 
 test "conformance: window suite passes for StubWindow (callback model)" {

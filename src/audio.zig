@@ -120,6 +120,13 @@ pub fn AudioInterface(comptime Impl: type) type {
 
 /// Stub audio for testing — all methods are no-ops.
 pub const StubAudio = struct {
+    // Conformance-suite fixtures (labelle-assembler#453). The stub's loaders
+    // ignore the path, so these just let `conformance.runAudioSuite` drive the
+    // file-backed load→play→stop smoke against the reference stub; a real
+    // backend would point these at tiny valid assets it can open.
+    pub const conformanceSoundPath: [:0]const u8 = "conformance-fixture.wav";
+    pub const conformanceMusicPath: [:0]const u8 = "conformance-fixture.ogg";
+
     pub fn playSound(_: u32) void {}
     pub fn stopSound(_: u32) void {}
     pub fn setVolume(_: f32) void {}

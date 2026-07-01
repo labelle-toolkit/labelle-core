@@ -452,6 +452,12 @@ pub const MockBackend = struct {
         return .{ .width = 4096, .height = 4096 };
     }
 
+    /// Conformance-suite font fixture (labelle-assembler#453). The mock's
+    /// `decodeFont` ignores the input bytes, so any non-empty blob drives the
+    /// font-decode behavioral checks in `conformance.runRenderSuite`; a real
+    /// backend would point this at a tiny valid TTF it can decode.
+    pub const conformanceFontBytes: []const u8 = "MOCKFONT";
+
     /// Stub CPU bake: returns a 1×1 alpha atlas with a single glyph
     /// covering codepoint `params.ranges[0].first` (or 0x20 if ranges
     /// is empty). All four slices come from the caller's allocator;

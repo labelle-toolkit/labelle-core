@@ -201,9 +201,25 @@ pub const loader_fn_decls = [_][]const u8{
 };
 
 /// Required function decls (the draw API + the image asset-loader surface).
-/// Kept as the union of the two named sub-surfaces so nothing downstream that
-/// referenced the aggregate breaks.
-pub const required_fn_decls = draw_fn_decls ++ loader_fn_decls;
+///
+/// This is the FLAT aggregate view every render backend must satisfy. It is
+/// spelled out explicitly (rather than `draw_fn_decls ++ loader_fn_decls`) to
+/// preserve the ORIGINAL decl order — the loader decls (`loadTexture`/
+/// `decodeImage`/`uploadTexture`/`unloadTexture`) sit between `drawText` and
+/// `beginMode2D`, not after `setDesignSize`. `missingBackendDecls` walks this
+/// order, so keeping it stable keeps the `assertBackend` diagnostic text
+/// byte-identical (a `draw ++ loader` concat would move the loader decls to the
+/// tail and silently reword the compile error). The `draw_fn_decls` /
+/// `loader_fn_decls` sub-lists remain the source of truth for the *tagged*,
+/// sub-surface-aware view (`missingBackendDeclsBySubSurface`); this aggregate is
+/// their union as a SET, just ordered for a stable flat diagnostic.
+pub const required_fn_decls = [_][]const u8{
+    "drawTexturePro", "drawRectangleRec", "drawCircle",      "drawTriangle",
+    "drawPolygon",    "drawLine",         "drawText",        "loadTexture",
+    "decodeImage",    "uploadTexture",    "unloadTexture",   "beginMode2D",
+    "endMode2D",      "getScreenWidth",   "getScreenHeight", "screenToWorld",
+    "worldToScreen",  "setDesignSize",
+};
 
 /// Required color-constant decls.
 pub const required_color_decls = [_][]const u8{
@@ -292,8 +308,13 @@ pub fn missingBackendDeclsBySubSurface(comptime Impl: type) []const MissingDecl 
 ///
 /// Aggregate view (flat name list) preserved for callers that don't care which
 /// sub-surface a decl belongs to; see `missingBackendDeclsBySubSurface` for the
-/// tagged view. The name ordering is unchanged (types → draw → loader → colors
-/// → paired), so the `assertBackend` message is byte-identical.
+/// tagged view. Walks `required_type_decls ++ required_fn_decls ++
+/// required_color_decls` in that exact order (then appends the paired
+/// compressed-texture unit) — the SAME order the pre-sub-surface-split
+/// implementation used, so the `assertBackend` compile-error text is
+/// byte-identical. (The tagged sibling groups draw-then-loader, which is a
+/// different order — that's fine: the tagged view exists to report *where* a
+/// decl lives, not to reproduce the flat diagnostic.)
 pub fn missingBackendDecls(comptime Impl: type) []const []const u8 {
     comptime {
         var missing: []const []const u8 = &.{};
@@ -301,8 +322,16 @@ pub fn missingBackendDecls(comptime Impl: type) []const []const u8 {
         // `comptime {}` scope, so the loop is comptime-evaluated and `name` is
         // comptime in each iteration; `inline` here is redundant and a Zig 0.16
         // compile error.
-        for (missingBackendDeclsBySubSurface(Impl)) |m| {
-            missing = missing ++ [_][]const u8{m.name};
+        for (required_type_decls ++ required_fn_decls ++ required_color_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_][]const u8{name};
+        }
+        // Optional-but-paired: a backend that defines one of the compressed-
+        // texture pair without the other would silently fall back to CPU
+        // decode (then fail) — surface it as a contract violation, mirroring
+        // the check `loadTextureFromMemory` makes below. Appended last so the
+        // flat diagnostic order matches the original implementation exactly.
+        if (@hasDecl(Impl, "isCompressed") != @hasDecl(Impl, "uploadCompressed")) {
+            missing = missing ++ [_][]const u8{"isCompressed+uploadCompressed (must define both or neither)"};
         }
         return missing;
     }

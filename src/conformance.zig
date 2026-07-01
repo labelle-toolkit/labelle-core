@@ -167,7 +167,16 @@ pub fn runRenderSuite(comptime Impl: type) !void {
         // `transparent` must be fully transparent (a == 0). Checking only a
         // subset (as before) let an alpha-0 "opaque" constant or a red==blue
         // swap slip through.
+        // All 10 unordered pairs among white/black/red/green/blue must be
+        // distinct — checking only a subset let aliases like `white == red` or
+        // `black == blue` slip through.
         try testing.expect(!colorEql(B.white, B.black));
+        try testing.expect(!colorEql(B.white, B.red));
+        try testing.expect(!colorEql(B.white, B.green));
+        try testing.expect(!colorEql(B.white, B.blue));
+        try testing.expect(!colorEql(B.black, B.red));
+        try testing.expect(!colorEql(B.black, B.green));
+        try testing.expect(!colorEql(B.black, B.blue));
         try testing.expect(!colorEql(B.red, B.green));
         try testing.expect(!colorEql(B.green, B.blue));
         try testing.expect(!colorEql(B.red, B.blue));
@@ -207,6 +216,28 @@ pub fn runRenderSuite(comptime Impl: type) !void {
         // uploadTexture consumes a DecodedImage and yields a backend Texture;
         // the caller still owns `pixels` (freed by the defer above).
         const tex = try B.uploadTexture(decoded);
+        B.unloadTexture(tex);
+    }
+
+    // ── file-based loadTexture (BEHAVIORAL: the file loader is wired) ──
+    // `loadTexture` (file-path based) is a REQUIRED contract decl, so the suite
+    // must actually invoke it — exercising only `loadTextureFromMemory` would let
+    // a backend whose file loader always errors (but whose decodeImage/upload
+    // path works) pass. We do NOT depend on a cwd `conformance.png` (it doesn't
+    // exist in a backend repo — the original bug): instead write the embedded PNG
+    // to a temp file and load THAT, then clean up. `Texture` is a backend-opaque
+    // type with no contract-specified shape, so we can't assert its fields
+    // generically — the successful `try` (loader returned without error) IS the
+    // sane-handle assertion; unloading it proves the load→unload pair links.
+    {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "conformance.png", .data = &valid_png_1x1_rgba });
+        // `realPathFileAlloc` yields a NUL-terminated absolute path for the
+        // `[:0]const u8` path contract; freed on the way out.
+        const z_path = try tmp.dir.realPathFileAlloc(testing.io, "conformance.png", testing.allocator);
+        defer testing.allocator.free(z_path);
+        const tex = try B.loadTexture(z_path);
         B.unloadTexture(tex);
     }
 

@@ -72,6 +72,10 @@ pub const StderrLogSink = struct {
 
     const is_android = builtin.target.abi == .android or builtin.target.abi == .androideabi;
 
+    const is_emscripten = builtin.target.os.tag == .emscripten;
+
+    extern fn emscripten_console_log(str: [*:0]const u8) void;
+
     // Android NDK liblog priorities
     const ANDROID_LOG_DEBUG: c_int = 3;
     const ANDROID_LOG_INFO: c_int = 4;
@@ -97,7 +101,22 @@ pub const StderrLogSink = struct {
         args: anytype,
     ) void {
         const prefix = comptime if (scope.len > 0) scope ++ ": " else "";
-        if (comptime is_android) {
+        if (comptime is_emscripten) {
+            // std.debug.print is unusable on emscripten: the generated wasm root
+            // sets std.Options.debug_io to std.Io.failing (the mandatory
+            // std.Io.Threaded workaround), so any std.debug.print traps with
+            // "reached unreachable code". Route through the JS console instead.
+            var buf: [1024]u8 = undefined;
+            const formatted = std.fmt.bufPrintZ(
+                &buf,
+                "[{d:.3}s] {s:<5} " ++ prefix ++ fmt,
+                .{ elapsed_s, level.label() } ++ args,
+            ) catch blk: {
+                buf[buf.len - 1] = 0;
+                break :blk buf[0 .. buf.len - 1 :0];
+            };
+            emscripten_console_log(formatted.ptr);
+        } else if (comptime is_android) {
             // Format into a stack buffer, NUL-terminate, hand off to logcat.
             // 1 KiB matches the NDK's per-message limit before truncation.
             var buf: [1024]u8 = undefined;

@@ -74,6 +74,22 @@ const AudioInterface = audio_mod.AudioInterface;
 const GamepadEvent = input_mod.GamepadEvent;
 const GamepadDescription = input_mod.GamepadDescription;
 
+// ── embedded fixtures ────────────────────────────────────────────────────────
+
+/// A real, minimal, valid 1×1 8-bit RGBA PNG (IHDR + IDAT + IEND, zlib-
+/// compressed scanline). Fed to `decodeImage` / `loadTextureFromMemory` so the
+/// buffer-size + decode→upload invariants run against a genuinely decodable blob
+/// — a real PNG-validating decoder rejects arbitrary text before the invariant
+/// is ever checked, so a text placeholder would only pass for a byte-ignoring
+/// mock. Any conformant PNG decoder yields a 1×1 (width*height*4 == 4) buffer.
+const valid_png_1x1_rgba = [_]u8{
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x10, 0x54, 0x32, 0x76,
+    0x01, 0x00, 0x01, 0x59, 0x00, 0xab, 0xcc, 0x74, 0x37, 0xbb, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+};
+
 // ── comptime helpers ────────────────────────────────────────────────────────
 
 /// True when `T` is a struct all of whose fields carry a default value — i.e.
@@ -91,13 +107,23 @@ fn isDefaultConstructible(comptime T: type) bool {
 /// True when `C` looks like an RGBA color struct (has `r`/`g`/`b`/`a` fields).
 /// The render contract's `color()` fallback assumes this shape; gating on it
 /// keeps the channel-round-trip check honest for exotic color reprs.
+///
+/// The `@typeInfo(...) == .@"struct"` guard is load-bearing: `@hasField` is a
+/// compile ERROR (not `false`) on a non-struct type, so a backend whose `Color`
+/// is an opaque scalar (e.g. `Color = u32`, a packed RGBA word) would fail to
+/// compile the suite entirely. Guarding first lets those backends be SKIPPED
+/// (the channel round-trip isn't expressible for a scalar) rather than rejected.
 fn hasRgbaChannels(comptime C: type) bool {
+    if (@typeInfo(C) != .@"struct") return false;
     return @hasField(C, "r") and @hasField(C, "g") and @hasField(C, "b") and @hasField(C, "a");
 }
 
 /// True when `V` has `x`/`y` fields (the conventional Vector2 shape the draw
-/// API and coordinate methods use).
+/// API and coordinate methods use). Guards on `.@"struct"` first for the same
+/// reason as `hasRgbaChannels` — a non-struct `Vector2` (array/scalar repr) is
+/// skipped, not a compile error.
 fn hasXY(comptime V: type) bool {
+    if (@typeInfo(V) != .@"struct") return false;
     return @hasField(V, "x") and @hasField(V, "y");
 }
 
@@ -135,12 +161,31 @@ pub fn runRenderSuite(comptime Impl: type) !void {
         try testing.expectEqual(@as(u8, 78), c.a);
 
         // Color constants: distinct + sane opacity. white/black/red/green/blue
-        // are required decls; transparent must be non-opaque, white opaque.
+        // are required decls; each primary must be pairwise distinct so a
+        // backend that aliases (e.g. blue == red) is caught, and every
+        // non-transparent constant must be fully opaque (a == 255) while
+        // `transparent` must be fully transparent (a == 0). Checking only a
+        // subset (as before) let an alpha-0 "opaque" constant or a red==blue
+        // swap slip through.
+        // All 10 unordered pairs among white/black/red/green/blue must be
+        // distinct — checking only a subset let aliases like `white == red` or
+        // `black == blue` slip through.
         try testing.expect(!colorEql(B.white, B.black));
+        try testing.expect(!colorEql(B.white, B.red));
+        try testing.expect(!colorEql(B.white, B.green));
+        try testing.expect(!colorEql(B.white, B.blue));
+        try testing.expect(!colorEql(B.black, B.red));
+        try testing.expect(!colorEql(B.black, B.green));
+        try testing.expect(!colorEql(B.black, B.blue));
         try testing.expect(!colorEql(B.red, B.green));
         try testing.expect(!colorEql(B.green, B.blue));
-        try testing.expectEqual(@as(u8, 0), B.transparent.a);
+        try testing.expect(!colorEql(B.red, B.blue));
         try testing.expectEqual(@as(u8, 255), B.white.a);
+        try testing.expectEqual(@as(u8, 255), B.black.a);
+        try testing.expectEqual(@as(u8, 255), B.red.a);
+        try testing.expectEqual(@as(u8, 255), B.green.a);
+        try testing.expectEqual(@as(u8, 255), B.blue.a);
+        try testing.expectEqual(@as(u8, 0), B.transparent.a);
     }
 
     // ── Screen-dimension reads are stable/pure (BEHAVIORAL) ──
@@ -158,7 +203,7 @@ pub fn runRenderSuite(comptime Impl: type) !void {
     // buffer is owned by the caller's allocator (freed here). testing.allocator
     // catches a leak or a mis-sized/over-freed buffer.
     {
-        const decoded = try B.decodeImage("png", "conformance-probe-bytes", testing.allocator);
+        const decoded = try B.decodeImage("png", &valid_png_1x1_rgba, testing.allocator);
         defer testing.allocator.free(decoded.pixels);
         try testing.expect(decoded.width > 0);
         try testing.expect(decoded.height > 0);
@@ -174,10 +219,34 @@ pub fn runRenderSuite(comptime Impl: type) !void {
         B.unloadTexture(tex);
     }
 
-    // loadTextureFromMemory convenience wrapper (decode+upload+free) returns a
-    // Texture for an ordinary blob (BEHAVIORAL: the wrapper is wired).
+    // ── file-based loadTexture (BEHAVIORAL: the file loader is wired) ──
+    // `loadTexture` (file-path based) is a REQUIRED contract decl, so the suite
+    // must actually invoke it — exercising only `loadTextureFromMemory` would let
+    // a backend whose file loader always errors (but whose decodeImage/upload
+    // path works) pass. We do NOT depend on a cwd `conformance.png` (it doesn't
+    // exist in a backend repo — the original bug): instead write the embedded PNG
+    // to a temp file and load THAT, then clean up. `Texture` is a backend-opaque
+    // type with no contract-specified shape, so we can't assert its fields
+    // generically — the successful `try` (loader returned without error) IS the
+    // sane-handle assertion; unloading it proves the load→unload pair links.
     {
-        const tex = try B.loadTextureFromMemory("png", "ordinary-non-compressed-bytes");
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "conformance.png", .data = &valid_png_1x1_rgba });
+        // `realPathFileAlloc` yields a NUL-terminated absolute path for the
+        // `[:0]const u8` path contract; freed on the way out.
+        const z_path = try tmp.dir.realPathFileAlloc(testing.io, "conformance.png", testing.allocator);
+        defer testing.allocator.free(z_path);
+        const tex = try B.loadTexture(z_path);
+        B.unloadTexture(tex);
+    }
+
+    // loadTextureFromMemory convenience wrapper (decode+upload+free) returns a
+    // Texture for an ordinary (non-compressed) blob (BEHAVIORAL: the wrapper is
+    // wired). Fed the real PNG so a decode-validating backend actually reaches
+    // the upload step instead of erroring on a bogus payload.
+    {
+        const tex = try B.loadTextureFromMemory("png", &valid_png_1x1_rgba);
         B.unloadTexture(tex);
     }
 
@@ -217,8 +286,13 @@ pub fn runRenderSuite(comptime Impl: type) !void {
 
     // ── Draw primitives (SHAPE-ONLY smoke: no host GPU to observe pixels) ──
     // We only prove each primitive links and doesn't crash with valid args.
+    // The texture comes from the in-memory PNG fixture via `loadTextureFromMemory`
+    // — NOT from an on-disk `loadTexture("conformance.png")`, which a real
+    // filesystem-backed backend would fail with file-not-found in a backend repo
+    // (no such file exists there). The in-memory path exercises the same
+    // decode→upload→Texture wiring the draw calls need without touching the cwd.
     {
-        const tex = try B.loadTexture("conformance.png");
+        const tex = try B.loadTextureFromMemory("png", &valid_png_1x1_rgba);
         defer B.unloadTexture(tex);
         const rect: B.Rectangle = std.mem.zeroes(B.Rectangle);
         const v: B.Vector2 = std.mem.zeroes(B.Vector2);
@@ -293,21 +367,54 @@ fn runRenderValueTypeChecks() !void {
     try testing.expectEqual(@as(u32, 0x20), params.ranges[0].first);
 }
 
-/// Font atlas capability checks. Gated on the four paired font decls; a backend
-/// that omits them is not a font backend and is skipped. BEHAVIORAL: bitmap
-/// sizing, glyph presence, sorted codepoint index, and the documented
+/// Font atlas capability checks. BEHAVIORAL: bitmap sizing, glyph presence,
+/// sorted codepoint index, glyph-index bounds, and the documented
 /// `line_height == ascent - descent + line_gap` precompute.
+///
+/// The font capability is ALL-OR-NOTHING: a backend either declares the full
+/// set (`decodeFont` + `FontAtlas` + `uploadFontAtlas` + `unloadFontAtlas`) or
+/// none of it. A backend that declares SOME but not all is a half-implemented
+/// surface — the suite fails with `error.IncompleteFontCapability` rather than
+/// silently treating it as "not a font backend" (the old guard did the latter,
+/// so a backend missing e.g. `unloadFontAtlas` reported success).
+///
+/// The decode-behavioral half needs a genuinely decodable font blob. A real
+/// TTF-validating decoder rejects arbitrary bytes, so the suite uses a
+/// BACKEND-PROVIDED fixture: a backend exposes `pub const conformanceFontBytes:
+/// []const u8` (and optionally `pub const conformanceFontType: [:0]const u8`,
+/// default "ttf") pointing at a tiny valid font it can decode. When no fixture
+/// is provided the decode→bake→upload behavioral checks are SKIPPED (documented)
+/// — the decl-completeness invariant above still holds. (Embedding a universal
+/// valid TTF here isn't practical the way a 1×1 PNG is; the fixture seam keeps
+/// the check real for backends that opt in.)
 fn runFontChecks(comptime Impl: type, comptime B: type) !void {
-    if (comptime !(@hasDecl(Impl, "decodeFont") and
-        @hasDecl(Impl, "FontAtlas") and
-        @hasDecl(Impl, "uploadFontAtlas") and
-        @hasDecl(Impl, "unloadFontAtlas")))
-    {
+    const has_decode = @hasDecl(Impl, "decodeFont");
+    const has_atlas = @hasDecl(Impl, "FontAtlas");
+    const has_upload = @hasDecl(Impl, "uploadFontAtlas");
+    const has_unload = @hasDecl(Impl, "unloadFontAtlas");
+    const has_all = comptime (has_decode and has_atlas and has_upload and has_unload);
+    const has_any = comptime (has_decode or has_atlas or has_upload or has_unload);
+
+    if (comptime !has_all) {
+        // Half-implemented font surface → contract violation, not a silent skip.
+        if (comptime has_any) return error.IncompleteFontCapability;
         return; // not a font backend — nothing to verify.
     }
 
+    if (comptime !@hasDecl(Impl, "conformanceFontBytes")) {
+        // Full font backend but no decodable fixture — the decode-behavioral
+        // checks can't run against a synthetic blob for a real decoder. Skip
+        // them (documented); the all-or-nothing decl invariant already passed.
+        return;
+    }
+
+    const font_type: [:0]const u8 = comptime if (@hasDecl(Impl, "conformanceFontType"))
+        Impl.conformanceFontType
+    else
+        "ttf";
+
     const params = backend_contract.FontBakeParams{};
-    const font = try B.decodeFont("ttf", "conformance-font-bytes", params, testing.allocator);
+    const font = try B.decodeFont(font_type, Impl.conformanceFontBytes, params, testing.allocator);
     defer {
         testing.allocator.free(font.bitmap);
         testing.allocator.free(font.glyphs);
@@ -328,6 +435,13 @@ fn runFontChecks(comptime Impl: type, comptime B: type) !void {
         while (i < font.codepoint_index.len) : (i += 1) {
             try testing.expect(font.codepoint_index[i - 1].codepoint <= font.codepoint_index[i].codepoint);
         }
+    }
+
+    // Every codepoint_index entry must point at a real glyph: `glyph_index <
+    // glyphs.len`. Renderers index `font.glyphs[entry.glyph_index]` directly, so
+    // an out-of-range index is an out-of-bounds read waiting to happen.
+    for (font.codepoint_index) |entry| {
+        try testing.expect(entry.glyph_index < font.glyphs.len);
     }
 
     // Documented precompute: line_height == ascent - descent + line_gap
@@ -463,33 +577,65 @@ pub fn runInputSuite(comptime Impl: type) !void {
 ///
 /// SHAPE-ONLY / OUT-OF-SCOPE: actual playback, mixing, and volume levels —
 /// there is no host audio device and no `DeviceSink`/mixer contract in
-/// labelle-core today (see module doc). We call the full sound + music + global
+/// labelle-core today (see module doc). We call the sound + music + global
 /// surface to prove it links and is no-op-safe, but assert nothing audible.
+///
+/// The load→play→stop chain is only driven with an id we can produce WITHOUT
+/// reading a file that doesn't exist in a backend repo: either the fallback id 0
+/// (when the backend omits `loadSound`/`loadMusic`, the interface returns 0
+/// without touching the filesystem) or a backend-provided fixture path
+/// (`pub const conformanceSoundPath`/`conformanceMusicPath: [:0]const u8`). A
+/// real loader with no fixture skips the file-backed smoke — the old code read a
+/// hard-coded `conformance.wav`/`.ogg` that only a byte-ignoring stub tolerated.
 pub fn runAudioSuite(comptime Impl: type) !void {
     const A = AudioInterface(Impl); // re-runs the playSound/stopSound gate.
 
-    // ── Sound-effect surface (SHAPE-ONLY smoke + fallback asserts) ──
-    const sid = A.loadSound("conformance.wav");
-    if (comptime !@hasDecl(Impl, "loadSound")) try testing.expectEqual(@as(u32, 0), sid);
-    A.playSound(sid);
-    A.setSoundVolume(sid, 0.5);
-    if (comptime !@hasDecl(Impl, "isSoundPlaying")) try testing.expect(!A.isSoundPlaying(sid));
-    _ = A.isSoundPlaying(sid); // bool, must not crash
-    A.stopSound(sid);
-    A.unloadSound(sid);
+    // ── Fallback semantics (BEHAVIORAL — no device or file needed) ──
+    // A backend that omits a capability must degrade to a safe default; these
+    // hold for id 0 without loading anything.
+    if (comptime !@hasDecl(Impl, "loadSound"))
+        try testing.expectEqual(@as(u32, 0), A.loadSound("conformance.wav"));
+    if (comptime !@hasDecl(Impl, "isSoundPlaying"))
+        try testing.expect(!A.isSoundPlaying(0));
+    if (comptime !@hasDecl(Impl, "loadMusic"))
+        try testing.expectEqual(@as(u32, 0), A.loadMusic("conformance.ogg"));
+    if (comptime !@hasDecl(Impl, "isMusicPlaying"))
+        try testing.expect(!A.isMusicPlaying(0));
 
-    // ── Music (streaming) surface (SHAPE-ONLY smoke + fallback asserts) ──
-    const mid = A.loadMusic("conformance.ogg");
-    if (comptime !@hasDecl(Impl, "loadMusic")) try testing.expectEqual(@as(u32, 0), mid);
-    A.playMusic(mid);
-    A.setMusicVolume(mid, 0.5);
-    A.updateMusic(mid);
-    if (comptime !@hasDecl(Impl, "isMusicPlaying")) try testing.expect(!A.isMusicPlaying(mid));
-    _ = A.isMusicPlaying(mid);
-    A.pauseMusic(mid);
-    A.resumeMusic(mid);
-    A.stopMusic(mid);
-    A.unloadMusic(mid);
+    // ── Sound-effect surface (SHAPE-ONLY smoke) ──
+    {
+        const maybe_sid: ?u32 = blk: {
+            if (comptime !@hasDecl(Impl, "loadSound")) break :blk @as(u32, 0);
+            if (comptime @hasDecl(Impl, "conformanceSoundPath")) break :blk A.loadSound(Impl.conformanceSoundPath);
+            break :blk null; // real loader, no fixture → skip file-backed smoke
+        };
+        if (maybe_sid) |sid| {
+            A.playSound(sid);
+            A.setSoundVolume(sid, 0.5);
+            _ = A.isSoundPlaying(sid); // bool, must not crash
+            A.stopSound(sid);
+            A.unloadSound(sid);
+        }
+    }
+
+    // ── Music (streaming) surface (SHAPE-ONLY smoke) — same fixture gating ──
+    {
+        const maybe_mid: ?u32 = blk: {
+            if (comptime !@hasDecl(Impl, "loadMusic")) break :blk @as(u32, 0);
+            if (comptime @hasDecl(Impl, "conformanceMusicPath")) break :blk A.loadMusic(Impl.conformanceMusicPath);
+            break :blk null;
+        };
+        if (maybe_mid) |mid| {
+            A.playMusic(mid);
+            A.setMusicVolume(mid, 0.5);
+            A.updateMusic(mid);
+            _ = A.isMusicPlaying(mid);
+            A.pauseMusic(mid);
+            A.resumeMusic(mid);
+            A.stopMusic(mid);
+            A.unloadMusic(mid);
+        }
+    }
 
     // ── Global surface (SHAPE-ONLY smoke) ──
     A.setVolume(0.75);

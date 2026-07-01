@@ -17,6 +17,16 @@ pub const GamepadUnavailableReason = gamepad.UnavailableReason;
 // gamepad/gesture stay OPTIONAL (a headless or remote-only backend declares
 // none, and `InputInterface`'s `@hasDecl` fallbacks return 0/false).
 
+/// Contract-version integer for the input surface (labelle-assembler#453, RFC
+/// §"Versioning"). MONOTONIC, NOT semver: bump by 1 only on a BREAKING change to
+/// the required input decl set (`required_input_decls`) or the signatures of the
+/// required/capability-gated methods. Adding a new `@hasDecl`-gated optional
+/// capability (mouse/touch/gamepad/gesture) is non-breaking and does NOT bump
+/// it. A backend declares the version it targets; the assembler-generated
+/// adapter asserts `N == M` — that emit is a deferred follow-up, this constant
+/// is its ABI home.
+pub const INPUT_CONTRACT_VERSION: u32 = 1;
+
 /// The minimum every input backend must declare. Kept deliberately small — the
 /// rest of the surface degrades gracefully via the `@hasDecl` fallbacks below.
 pub const required_input_decls = [_][]const u8{ "isKeyDown", "isKeyPressed" };

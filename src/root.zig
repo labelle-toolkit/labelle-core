@@ -45,18 +45,24 @@ pub const validateComponentTuple = ecs.validateComponentTuple;
 
 pub const AudioInterface = audio.AudioInterface;
 pub const StubAudio = audio.StubAudio;
+// Per-sub-surface contract versions (labelle-assembler#453). See the ABI-home
+// files for what a bump means.
+pub const AUDIO_PLAYBACK_CONTRACT_VERSION = audio.AUDIO_PLAYBACK_CONTRACT_VERSION;
+pub const AUDIO_LOADER_CONTRACT_VERSION = audio.AUDIO_LOADER_CONTRACT_VERSION;
 
 pub const InputInterface = input.InputInterface;
 pub const StubInput = input.StubInput;
 pub const assertInput = input.assertInput;
 pub const missingInputDecls = input.missingInputDecls;
 pub const required_input_decls = input.required_input_decls;
+pub const INPUT_CONTRACT_VERSION = input.INPUT_CONTRACT_VERSION;
 
 pub const Window = window_contract.Window;
 pub const assertWindow = window_contract.assertWindow;
 pub const missingWindowDecls = window_contract.missingWindowDecls;
 pub const required_window_decls = window_contract.required_window_decls;
 pub const StubWindow = window_contract.StubWindow;
+pub const WINDOW_CONTRACT_VERSION = window_contract.WINDOW_CONTRACT_VERSION;
 
 // Gamepad event contract (core#18) — COPY-only value types crossing the
 // hotplug ring buffer, plus the per-OS source skeleton.
@@ -88,6 +94,18 @@ pub const VisualType = render.VisualType;
 pub const Backend = backend_contract.Backend;
 pub const assertBackend = backend_contract.assertBackend;
 pub const missingBackendDecls = backend_contract.missingBackendDecls;
+// Sub-surface-aware split + reporting (labelle-assembler#453).
+pub const missingBackendDeclsBySubSurface = backend_contract.missingBackendDeclsBySubSurface;
+pub const subSurfaceOf = backend_contract.subSurfaceOf;
+pub const RenderSubSurface = backend_contract.RenderSubSurface;
+pub const MissingDecl = backend_contract.MissingDecl;
+pub const draw_fn_decls = backend_contract.draw_fn_decls;
+pub const loader_fn_decls = backend_contract.loader_fn_decls;
+pub const required_fn_decls = backend_contract.required_fn_decls;
+// Render-contract versions: the two named sub-surfaces + the composite.
+pub const DRAW_CONTRACT_VERSION = backend_contract.DRAW_CONTRACT_VERSION;
+pub const LOADER_CONTRACT_VERSION = backend_contract.LOADER_CONTRACT_VERSION;
+pub const BACKEND_CONTRACT_VERSION = backend_contract.BACKEND_CONTRACT_VERSION;
 pub const DecodedImage = backend_contract.DecodedImage;
 pub const DecodedFont = backend_contract.DecodedFont;
 pub const FontBakeParams = backend_contract.FontBakeParams;

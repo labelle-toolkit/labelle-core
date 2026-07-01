@@ -21,6 +21,15 @@
 //! shared instead of per-dialect). Conforming the backends is a follow-up slice;
 //! this file is the canonical surface they rename *to*.
 
+/// Contract-version integer for the window surface (labelle-assembler#453, RFC
+/// §"Versioning"). MONOTONIC, NOT semver: bump by 1 only on a BREAKING change to
+/// the required window decl set (`required_window_decls`) or the signatures of
+/// the required/capability-gated methods. Adding a new capability-gated
+/// (`@hasDecl`) optional is non-breaking and does NOT bump it. A backend
+/// declares the version it targets; the assembler-generated adapter asserts
+/// `N == M` — that emit is a deferred follow-up, this constant is its ABI home.
+pub const WINDOW_CONTRACT_VERSION: u32 = 1;
+
 /// The minimum every window backend must declare — the engine-facing surface
 /// that is identical across loop and callback models. Kept small on purpose:
 /// the loop-specific (`shouldQuit`) and per-frame (`beginFrame`/`endFrame`)

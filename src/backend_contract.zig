@@ -138,6 +138,43 @@ pub const DecodedFont = struct {
     kerning: []const KernPair,
 };
 
+// ── Contract versions ───────────────────────────────────────────────────────
+//
+// Per-sub-surface contract-version integers (labelle-assembler#453, RFC
+// §"Versioning — the `contract_version` field"). Each is a MONOTONIC integer,
+// NOT semver: it bumps by 1 only on a BREAKING change to that surface's decl
+// set/signatures — a required decl added/removed/renamed, a method signature
+// changed, or an `extern struct` value-type field added. Optional
+// (`@hasDecl`-gated) additions are non-breaking and do NOT bump the version.
+//
+// A backend declares which version it targets (e.g. `pub const
+// targets_backend_contract: u32 = 1;`); the assembler-generated adapter asserts
+// `N == M` against these constants at comptime. That `N == M` emit is a
+// SEPARATE follow-up (needs a core release + pin bump) and is NOT done here —
+// this file only provides the ABI home for the numbers.
+
+/// Version of the **draw API** sub-surface — the primitive-drawing decls
+/// (`drawTexturePro`/`drawRectangleRec`/`drawCircle`/`drawTriangle`/
+/// `drawPolygon`/`drawLine`/`drawText`/`beginMode2D`/… — see `draw_fn_decls`).
+/// Bump on any breaking change to that decl set or their signatures.
+pub const DRAW_CONTRACT_VERSION: u32 = 1;
+
+/// Version of the **asset-loader** sub-surface — the image + font
+/// decode/upload/unload decls (`decodeImage`/`uploadTexture`/`unloadTexture`/
+/// `loadTexture` + the `FontAtlas`/`decodeFont`/`uploadFontAtlas`/
+/// `unloadFontAtlas` font decls — see `loader_fn_decls`). Bump on any breaking
+/// change to that decl set, their signatures, or the shared value types
+/// (`DecodedImage`/`DecodedFont`/`Glyph`/… — their `extern` layout is part of
+/// this contract).
+pub const LOADER_CONTRACT_VERSION: u32 = 1;
+
+/// Composite render-contract version — the ergonomic single-number case for
+/// callers (and the assembler) that don't distinguish the two render
+/// sub-surfaces. Bump when EITHER `DRAW_CONTRACT_VERSION` or
+/// `LOADER_CONTRACT_VERSION` bumps (a breaking change to either half is a
+/// breaking change to the render backend contract as a whole).
+pub const BACKEND_CONTRACT_VERSION: u32 = 1;
+
 // ── Contract validation ─────────────────────────────────────────────────────
 
 /// Required type decls every render backend `Impl` must define.
@@ -145,24 +182,118 @@ pub const required_type_decls = [_][]const u8{
     "Texture", "Color", "Rectangle", "Vector2", "Camera2D",
 };
 
-/// Required function decls (the draw API + the image asset-loader surface).
-pub const required_fn_decls = [_][]const u8{
-    "drawTexturePro", "drawRectangleRec", "drawCircle",     "drawTriangle",
-    "drawPolygon",    "drawLine",         "drawText",       "loadTexture",
-    "decodeImage",    "uploadTexture",    "unloadTexture",  "beginMode2D",
+/// Required function decls for the **draw API** sub-surface — the
+/// primitive-drawing + camera/coordinate half of the render contract. Versioned
+/// by `DRAW_CONTRACT_VERSION`.
+pub const draw_fn_decls = [_][]const u8{
+    "drawTexturePro", "drawRectangleRec", "drawCircle",      "drawTriangle",
+    "drawPolygon",    "drawLine",         "drawText",        "beginMode2D",
     "endMode2D",      "getScreenWidth",   "getScreenHeight", "screenToWorld",
     "worldToScreen",  "setDesignSize",
 };
+
+/// Required function decls for the **asset-loader** sub-surface — the image
+/// decode/upload/unload half of the render contract (the font decls are
+/// optional/`@hasDecl`-gated, so they are not required here). Versioned by
+/// `LOADER_CONTRACT_VERSION`.
+pub const loader_fn_decls = [_][]const u8{
+    "loadTexture", "decodeImage", "uploadTexture", "unloadTexture",
+};
+
+/// Required function decls (the draw API + the image asset-loader surface).
+/// Kept as the union of the two named sub-surfaces so nothing downstream that
+/// referenced the aggregate breaks.
+pub const required_fn_decls = draw_fn_decls ++ loader_fn_decls;
 
 /// Required color-constant decls.
 pub const required_color_decls = [_][]const u8{
     "white", "black", "red", "green", "blue", "transparent",
 };
 
+/// Which named sub-surface a required decl belongs to. `draw` and `loader` are
+/// the two render sub-surfaces the file documents; `type` (required value
+/// types) and `color` (required color constants) are cross-cutting and reported
+/// under their own tags so the classification is total. Used by
+/// `missingBackendDeclsBySubSurface` to tell a caller *where* a missing decl
+/// lives.
+pub const RenderSubSurface = enum {
+    type,
+    draw,
+    loader,
+    color,
+
+    /// Stable lowercase tag ("draw"/"loader"/…), handy for prefixing a
+    /// diagnostic message.
+    pub fn tag(self: RenderSubSurface) []const u8 {
+        return @tagName(self);
+    }
+};
+
+/// A missing required decl, tagged with the sub-surface it belongs to.
+pub const MissingDecl = struct {
+    /// The missing decl's name (or a paired-decl description for the
+    /// `isCompressed`+`uploadCompressed` unit).
+    name: []const u8,
+    sub_surface: RenderSubSurface,
+};
+
+/// Classify a required decl `name` into its sub-surface. Comptime; asserts the
+/// name is a known required decl (so a typo in a decl list fails loudly rather
+/// than silently mis-classifying). The paired compressed-texture unit is a
+/// loader concern.
+pub fn subSurfaceOf(comptime name: []const u8) RenderSubSurface {
+    comptime {
+        for (required_type_decls) |n| if (std.mem.eql(u8, n, name)) return .type;
+        for (draw_fn_decls) |n| if (std.mem.eql(u8, n, name)) return .draw;
+        for (loader_fn_decls) |n| if (std.mem.eql(u8, n, name)) return .loader;
+        for (required_color_decls) |n| if (std.mem.eql(u8, n, name)) return .color;
+        @compileError("subSurfaceOf: '" ++ name ++ "' is not a known required render decl");
+    }
+}
+
+/// Sub-surface-aware sibling of `missingBackendDecls`: returns each missing
+/// required decl tagged with the sub-surface (`draw`/`loader`/`type`/`color`) it
+/// belongs to, or an empty slice if `Impl` satisfies the contract. Lets a caller
+/// report *which* render sub-surface a backend is missing decls from; callers
+/// that don't care use `missingBackendDecls` (the flat name list) unchanged.
+pub fn missingBackendDeclsBySubSurface(comptime Impl: type) []const MissingDecl {
+    comptime {
+        var missing: []const MissingDecl = &.{};
+        for (required_type_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_]MissingDecl{.{ .name = name, .sub_surface = .type }};
+        }
+        for (draw_fn_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_]MissingDecl{.{ .name = name, .sub_surface = .draw }};
+        }
+        for (loader_fn_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_]MissingDecl{.{ .name = name, .sub_surface = .loader }};
+        }
+        for (required_color_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_]MissingDecl{.{ .name = name, .sub_surface = .color }};
+        }
+        // Optional-but-paired: a backend that defines one of the compressed-
+        // texture pair without the other would silently fall back to CPU
+        // decode (then fail) — surface it as a contract violation, mirroring
+        // the check `loadTextureFromMemory` makes below. It's a loader concern.
+        if (@hasDecl(Impl, "isCompressed") != @hasDecl(Impl, "uploadCompressed")) {
+            missing = missing ++ [_]MissingDecl{.{
+                .name = "isCompressed+uploadCompressed (must define both or neither)",
+                .sub_surface = .loader,
+            }};
+        }
+        return missing;
+    }
+}
+
 /// Pure comptime check: returns the names of required decls `Impl` is
 /// missing, or an empty slice if it satisfies the contract. `assertBackend`
 /// wraps this with an `@compileError`; tests call it directly to assert
 /// acceptance/rejection without triggering a compile failure.
+///
+/// Aggregate view (flat name list) preserved for callers that don't care which
+/// sub-surface a decl belongs to; see `missingBackendDeclsBySubSurface` for the
+/// tagged view. The name ordering is unchanged (types → draw → loader → colors
+/// → paired), so the `assertBackend` message is byte-identical.
 pub fn missingBackendDecls(comptime Impl: type) []const []const u8 {
     comptime {
         var missing: []const []const u8 = &.{};
@@ -170,15 +301,8 @@ pub fn missingBackendDecls(comptime Impl: type) []const []const u8 {
         // `comptime {}` scope, so the loop is comptime-evaluated and `name` is
         // comptime in each iteration; `inline` here is redundant and a Zig 0.16
         // compile error.
-        for (required_type_decls ++ required_fn_decls ++ required_color_decls) |name| {
-            if (!@hasDecl(Impl, name)) missing = missing ++ [_][]const u8{name};
-        }
-        // Optional-but-paired: a backend that defines one of the compressed-
-        // texture pair without the other would silently fall back to CPU
-        // decode (then fail) — surface it as a contract violation, mirroring
-        // the check `loadTextureFromMemory` makes below.
-        if (@hasDecl(Impl, "isCompressed") != @hasDecl(Impl, "uploadCompressed")) {
-            missing = missing ++ [_][]const u8{"isCompressed+uploadCompressed (must define both or neither)"};
+        for (missingBackendDeclsBySubSurface(Impl)) |m| {
+            missing = missing ++ [_][]const u8{m.name};
         }
         return missing;
     }

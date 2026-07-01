@@ -1,3 +1,28 @@
+// ── Contract versions ───────────────────────────────────────────────────────
+//
+// Audio spans two sub-surfaces (labelle-assembler#453, RFC §"Versioning"): the
+// **playback** surface validated by `AudioInterface` below (`playSound`/
+// `stopSound` required, the rest `@hasDecl`-gated), and the **loader** surface —
+// the sound/music decode path, which is generated adapter code with no comptime
+// validator of its own elsewhere, so per the RFC's "both audio halves get one
+// ABI home" its version constant lives here alongside the playback one.
+//
+// Both are MONOTONIC integers, NOT semver: bump by 1 only on a BREAKING change
+// to that surface's decl set/signatures; `@hasDecl`-gated optional additions do
+// NOT bump them. A backend declares the versions it targets; the assembler-
+// generated adapter asserts `N == M` — that emit is a deferred follow-up, these
+// constants are its ABI home.
+
+/// Version of the audio **playback** sub-surface — the `AudioInterface` decls
+/// (`playSound`/`stopSound` required; `loadSound`/`isSoundPlaying`/music/global
+/// capability-gated).
+pub const AUDIO_PLAYBACK_CONTRACT_VERSION: u32 = 1;
+
+/// Version of the audio **loader** sub-surface — the sound/music decode path
+/// emitted as generated adapter code (no comptime validator of its own), homed
+/// here per the RFC's "both audio halves get one ABI home".
+pub const AUDIO_LOADER_CONTRACT_VERSION: u32 = 1;
+
 /// Comptime-validated audio interface.
 /// The assembler provides the concrete Impl (raylib, sokol, miniaudio, etc.).
 /// Both engine and plugins use this for zero-cost dispatch.

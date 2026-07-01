@@ -1698,3 +1698,158 @@ test "Backend: compressedDims reads dims from a compressed blob without decoding
     // Non-compressed blob → null (no dims to read without decoding).
     try testing.expectEqual(@as(?B.CompressedDims, null), B.compressedDims("ordinary-bytes"));
 }
+
+// ---------------------------------------------------------------------------
+// Behavioral conformance suites (labelle-assembler#453).
+//
+// `root.conformance` provides per-contract behavioral suites parameterized over
+// a backend `Impl`. These self-tests run each suite against the reference impls
+// — the mock render backend, StubWindow, StubInput, StubAudio — which is the
+// correctness proof for the suites themselves (a backend repo calls the exact
+// same `try root.conformance.runXSuite(MyBackend)`).
+// ---------------------------------------------------------------------------
+
+const conformance = root.conformance;
+
+test "conformance: render suite passes for the reference MockBackend" {
+    // MockBackend advertises the compressed-texture AND font capabilities, so
+    // this exercises the capability-gated branches (font atlas invariants,
+    // compressed probes) on top of the always-on behavioral checks.
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    try conformance.runRenderSuite(MockBackend);
+}
+
+test "conformance: render suite passes for a minimal (no-capability) backend" {
+    // A backend that satisfies only the required render surface — no font,
+    // no compressed textures, no designToPhysical — must still pass. This
+    // pins that the capability gates correctly SKIP the optional checks
+    // (and that the designToPhysical identity fallback fires).
+    const Minimal = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1, ox: f32 = 0, oy: f32 = 0 };
+        // @This().Color disambiguates from the file-scope `const Color = root.Color`.
+        const C = @This().Color;
+
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 2 * 3 * 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 2, .height = 3 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{ .id = 2 };
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(pos: Vector2, cam: Camera2D) Vector2 {
+            return .{ .x = (pos.x - cam.ox) / cam.zoom, .y = (pos.y - cam.oy) / cam.zoom };
+        }
+        pub fn worldToScreen(pos: Vector2, cam: Camera2D) Vector2 {
+            return .{ .x = pos.x * cam.zoom + cam.ox, .y = pos.y * cam.zoom + cam.oy };
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+    };
+    try conformance.runRenderSuite(Minimal);
+}
+
+test "conformance: window suite passes for StubWindow (callback model)" {
+    try conformance.runWindowSuite(root.StubWindow);
+}
+
+test "conformance: window suite passes for a loop-model window" {
+    // Exercises the ownsLoop()/canScreenshot() == true branches.
+    const LoopW = struct {
+        pub fn width() i32 {
+            return 800;
+        }
+        pub fn height() i32 {
+            return 600;
+        }
+        pub fn frameDuration() f64 {
+            return 0.016;
+        }
+        pub fn requestQuit() void {}
+        pub fn shouldQuit() bool {
+            return false;
+        }
+        pub fn isFullscreen() bool {
+            return false;
+        }
+        pub fn setFullscreen(_: bool) void {}
+        pub fn setVsync(_: bool) void {}
+        pub fn takeScreenshot(_: [:0]const u8) void {}
+    };
+    try conformance.runWindowSuite(LoopW);
+}
+
+test "conformance: input suite passes for StubInput (keyboard-only fallbacks)" {
+    // StubInput declares no gamepad hotplug decls, so this drives every
+    // absent-capability fallback assertion in the input suite.
+    try conformance.runInputSuite(root.StubInput);
+}
+
+test "conformance: input suite passes for a backend advertising gamepad hotplug" {
+    // A backend WITH pollGamepadEvents/describeGamepads must satisfy the
+    // buffer-bound safety invariant (empty buffer → 0; result <= capacity).
+    const FullInput = struct {
+        pub fn isKeyDown(_: u32) bool {
+            return false;
+        }
+        pub fn isKeyPressed(_: u32) bool {
+            return false;
+        }
+        pub fn pollGamepadEvents(out: []root.GamepadEvent) usize {
+            if (out.len == 0) return 0;
+            out[0] = root.GamepadEvent.connected(0, "Conformance Pad");
+            return 1;
+        }
+        pub fn describeGamepads(out: []root.GamepadDescription) usize {
+            if (out.len == 0) return 0;
+            out[0] = .{ .slot = 0, .connected = true };
+            return 1;
+        }
+    };
+    try conformance.runInputSuite(FullInput);
+}
+
+test "conformance: audio suite passes for StubAudio" {
+    try conformance.runAudioSuite(root.StubAudio);
+}
+
+test "conformance: audio suite passes for a minimal (required-only) audio backend" {
+    // Only the required playSound/stopSound pair — every other method is
+    // absent, so this drives the audio fallback assertions (loadSound → 0,
+    // isSoundPlaying → false, etc.).
+    const MinimalAudio = struct {
+        pub fn playSound(_: u32) void {}
+        pub fn stopSound(_: u32) void {}
+    };
+    try conformance.runAudioSuite(MinimalAudio);
+}

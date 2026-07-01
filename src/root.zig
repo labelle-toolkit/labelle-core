@@ -12,6 +12,9 @@ pub const render = @import("render.zig");
 pub const backend_contract = @import("backend_contract.zig");
 pub const window_contract = @import("window_contract.zig");
 pub const mock_backend = @import("mock_backend.zig");
+// Behavioral conformance suites (labelle-assembler#453). Parameterized over a
+// backend Impl; asserts contract-level *behavior*, not just decl shape.
+pub const conformance = @import("conformance.zig");
 pub const video = @import("video.zig");
 pub const hierarchy = @import("hierarchy.zig");
 pub const prefab = @import("prefab.zig");

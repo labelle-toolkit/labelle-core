@@ -51,6 +51,14 @@ pub fn missingWindowDecls(comptime Impl: type) []const []const u8 {
         for (required_window_decls) |name| {
             if (!@hasDecl(Impl, name)) missing = missing ++ [_][]const u8{name};
         }
+        // Optional-but-paired: surface loss is a single capability with two
+        // halves — a backend that declares one without the other would leave
+        // the surface either un-forgotten or un-restored. Surface it as a
+        // contract violation, mirroring the `isCompressed+uploadCompressed`
+        // pairing check in `backend_contract`.
+        if (@hasDecl(Impl, "surfaceLost") != @hasDecl(Impl, "surfaceRestored")) {
+            missing = missing ++ [_][]const u8{"surfaceLost+surfaceRestored (must define both or neither)"};
+        }
         return missing;
     }
 }
@@ -136,6 +144,36 @@ pub fn Window(comptime Impl: type) type {
         }
         pub inline fn takeScreenshot(path: [:0]const u8) void {
             if (@hasDecl(Impl, "takeScreenshot")) Impl.takeScreenshot(path);
+        }
+
+        // ── GPU surface loss (optional — mobile lifecycle, epic #386 Phase 4) ──
+        //
+        // On Android, TERM_WINDOW destroys every GPU texture while game state and
+        // the CPU allocator survive; INIT_WINDOW recreates the surface. Backends
+        // whose platform layer observes these events declare BOTH hooks (they are
+        // a paired unit); desktop backends omit both and the wrappers no-op.
+
+        /// `true` if this backend can lose and restore its GPU surface at runtime
+        /// (declares BOTH `surfaceLost` and `surfaceRestored`). Pure `@hasDecl`
+        /// reflection, mirroring `ownsLoop`/`canScreenshot` — the splice checks it
+        /// against the manifest's `surface_loss` capability.
+        pub inline fn supportsSurfaceLoss() bool {
+            return @hasDecl(Impl, "surfaceLost") and @hasDecl(Impl, "surfaceRestored");
+        }
+
+        /// The GPU surface died (e.g. Android TERM_WINDOW). Every GPU handle is
+        /// already DEAD: the backend must FORGET its surface-dependent state and
+        /// must NEVER free/destroy handles on the dead context (that is UB). No
+        /// GPU work may run until `surfaceRestored`. Safe no-op when undeclared.
+        pub inline fn surfaceLost() void {
+            if (@hasDecl(Impl, "surfaceLost")) Impl.surfaceLost();
+        }
+
+        /// A fresh GPU surface exists again (e.g. Android INIT_WINDOW). From this
+        /// point re-uploads (decode → upload through the render loader surface)
+        /// are safe. Safe no-op when undeclared.
+        pub inline fn surfaceRestored() void {
+            if (@hasDecl(Impl, "surfaceRestored")) Impl.surfaceRestored();
         }
     };
 }

@@ -1576,6 +1576,10 @@ test "assertWindow: required core accepted; loop vs callback capability-gated" {
     try testing.expect(!CallbackW.ownsLoop());
     try testing.expect(!CallbackW.canScreenshot());
     try testing.expect(!CallbackW.shouldQuit()); // fallback: keep running
+    // StubWindow declares neither surface-loss hook → probe false + no-op safe.
+    try testing.expect(!CallbackW.supportsSurfaceLoss());
+    CallbackW.surfaceLost();
+    CallbackW.surfaceRestored();
 
     // A loop-model window adds shouldQuit + a screenshot path → capabilities flip.
     const LoopW = struct {
@@ -1598,6 +1602,8 @@ test "assertWindow: required core accepted; loop vs callback capability-gated" {
     try testing.expect(W.ownsLoop());
     try testing.expect(W.canScreenshot());
     try testing.expect(W.shouldQuit());
+    // LoopW declares neither surface-loss hook → probe false.
+    try testing.expect(!W.supportsSurfaceLoss());
 
     // Missing a required core decl (frameDuration) → reported, not silent.
     const Incomplete = struct {
@@ -1616,6 +1622,69 @@ test "assertWindow: required core accepted; loop vs callback capability-gated" {
         if (std.mem.eql(u8, name, "frameDuration")) saw_fd = true;
     }
     try testing.expect(saw_fd);
+}
+
+// A window backend that declares BOTH surface-loss hooks, mutating file-local
+// counters so the positive dispatch path is observable. Mirrors the `LoopW`
+// habit above rather than adding optionals to StubWindow.
+var lossy_lost_calls: u32 = 0;
+var lossy_restored_calls: u32 = 0;
+const LossyWindow = struct {
+    pub fn width() i32 {
+        return 0;
+    }
+    pub fn height() i32 {
+        return 0;
+    }
+    pub fn frameDuration() f64 {
+        return 0;
+    }
+    pub fn requestQuit() void {}
+    pub fn surfaceLost() void {
+        lossy_lost_calls += 1;
+    }
+    pub fn surfaceRestored() void {
+        lossy_restored_calls += 1;
+    }
+};
+
+test "window: surface-loss hooks dispatch when both are declared" {
+    try testing.expectEqual(@as(usize, 0), comptime root.missingWindowDecls(LossyWindow).len);
+    const W = root.Window(LossyWindow);
+    try testing.expect(W.supportsSurfaceLoss());
+
+    lossy_lost_calls = 0;
+    lossy_restored_calls = 0;
+    W.surfaceLost();
+    W.surfaceRestored();
+    try testing.expectEqual(@as(u32, 1), lossy_lost_calls);
+    try testing.expectEqual(@as(u32, 1), lossy_restored_calls);
+}
+
+test "window: half a surface-loss pair is a contract violation" {
+    // Declares surfaceLost only — the required core is satisfied, but the
+    // unpaired half must be surfaced as a missing decl (Window() would fail
+    // assertWindow at comptime; missingWindowDecls reports it directly).
+    const HalfLossy = struct {
+        pub fn width() i32 {
+            return 0;
+        }
+        pub fn height() i32 {
+            return 0;
+        }
+        pub fn frameDuration() f64 {
+            return 0;
+        }
+        pub fn requestQuit() void {}
+        pub fn surfaceLost() void {}
+    };
+    const missing = comptime root.missingWindowDecls(HalfLossy);
+    try testing.expect(missing.len > 0);
+    var saw_pair = false;
+    inline for (missing) |name| {
+        if (std.mem.eql(u8, name, "surfaceLost+surfaceRestored (must define both or neither)")) saw_pair = true;
+    }
+    try testing.expect(saw_pair);
 }
 
 test "assertInput: complete impl accepted, incomplete impl reported" {
@@ -2036,6 +2105,13 @@ test "conformance: window suite passes for a loop-model window" {
         pub fn takeScreenshot(_: [:0]const u8) void {}
     };
     try conformance.runWindowSuite(LoopW);
+}
+
+test "conformance: window suite passes for a surface-loss-capable window" {
+    // Exercises the supportsSurfaceLoss() == true branch of the probe check.
+    // The suite does NOT call the declared hooks (a real surfaceRestored needs
+    // a live surface), so it only asserts the probe agrees with @hasDecl.
+    try conformance.runWindowSuite(LossyWindow);
 }
 
 test "conformance: input suite passes for StubInput (keyboard-only fallbacks)" {

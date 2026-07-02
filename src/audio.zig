@@ -1,3 +1,5 @@
+const std = @import("std");
+
 // ── Contract versions ───────────────────────────────────────────────────────
 //
 // Audio spans two sub-surfaces (labelle-assembler#453, RFC §"Versioning"): the
@@ -23,14 +25,102 @@ pub const AUDIO_PLAYBACK_CONTRACT_VERSION: u32 = 1;
 /// here per the RFC's "both audio halves get one ABI home".
 pub const AUDIO_LOADER_CONTRACT_VERSION: u32 = 1;
 
+// ── Audio contract (formalized — mirrors backend_contract.zig / input.zig) ───
+//
+// The duck-typed inline `@hasDecl` gate `AudioInterface` used is lifted into the
+// same shape the render `Backend` and `InputInterface` contracts use: a
+// required-decls array + a `missingAudioDecls` query + an `assertAudio` gate.
+// Like input, audio is intentionally permissive — only `playSound`/`stopSound`
+// are required; everything else stays OPTIONAL and degrades via the `@hasDecl`
+// fallbacks in `AudioInterface`.
+
+/// The minimum every audio backend must declare. Kept deliberately small —
+/// the rest of the surface degrades gracefully via the `@hasDecl` fallbacks
+/// in `AudioInterface`. All members are **playback** decls
+/// (`AUDIO_PLAYBACK_CONTRACT_VERSION`).
+pub const required_audio_decls = [_][]const u8{ "playSound", "stopSound" };
+
+/// Names of required decls `Impl` is missing, or an empty slice. Mirrors
+/// `backend_contract.missingBackendDecls` / `input.missingInputDecls` /
+/// `window_contract.missingWindowDecls`.
+pub fn missingAudioDecls(comptime Impl: type) []const []const u8 {
+    comptime {
+        var missing: []const []const u8 = &.{};
+        // Plain `for` (not `inline for`) — already a comptime scope; `inline`
+        // is a Zig 0.16 compile error here (see backend_contract).
+        for (required_audio_decls) |name| {
+            if (!@hasDecl(Impl, name)) missing = missing ++ [_][]const u8{name};
+        }
+        return missing;
+    }
+}
+
+/// Fail loudly at comptime, naming every missing decl. Mirrors
+/// `backend_contract.assertBackend` / `input.assertInput` / `assertWindow`.
+pub fn assertAudio(comptime Impl: type) void {
+    comptime {
+        const missing = missingAudioDecls(Impl);
+        if (missing.len != 0) {
+            var msg: []const u8 = "Audio impl does not satisfy the audio contract — missing decl(s):";
+            for (missing) |name| msg = msg ++ "\n  - " ++ name;
+            @compileError(msg);
+        }
+    }
+}
+
+// ── Sub-surface classification (playback vs loader) ──────────────────────────
+//
+// Mirrors the render tagged view (`backend_contract.RenderSubSurface` +
+// `subSurfaceOf`). Audio's two sub-surfaces are already named and versioned
+// above (`AUDIO_PLAYBACK_CONTRACT_VERSION`/`AUDIO_LOADER_CONTRACT_VERSION`);
+// these arrays classify every interface decl into its sub-surface so a caller
+// can tell *where* a decl lives. Both required decls are playback decls, so a
+// tagged missing-decl view would only ever report `.playback` — we ship the
+// classifier + arrays and skip the tagged query (see #54).
+
+/// The **loader** sub-surface decls (`AUDIO_LOADER_CONTRACT_VERSION`) — the
+/// path/IO-facing acquire/release of sound and music ids. All optional.
+pub const audio_loader_decls = [_][]const u8{
+    "loadSound", "unloadSound", "loadMusic", "unloadMusic",
+};
+
+/// The **playback** sub-surface decls (`AUDIO_PLAYBACK_CONTRACT_VERSION`) — drive
+/// already-loaded ids and global mix state. Includes the two required decls;
+/// the rest are optional.
+pub const audio_playback_decls = [_][]const u8{
+    "playSound",   "stopSound",     "isSoundPlaying", "setSoundVolume",
+    "playMusic",   "stopMusic",     "pauseMusic",     "resumeMusic",
+    "isMusicPlaying", "setMusicVolume", "updateMusic", "setVolume",
+    "update",
+};
+
+/// Which named sub-surface an audio decl belongs to. Stable lowercase `tag()`
+/// mirrors `backend_contract.RenderSubSurface.tag`.
+pub const AudioSubSurface = enum {
+    playback,
+    loader,
+
+    pub fn tag(self: AudioSubSurface) []const u8 {
+        return @tagName(self);
+    }
+};
+
+/// Classify an audio decl `name` into its sub-surface. Comptime; asserts the
+/// name is a known interface decl (a typo fails loudly rather than silently
+/// mis-classifying — mirrors `backend_contract.subSurfaceOf`).
+pub fn audioSubSurfaceOf(comptime name: []const u8) AudioSubSurface {
+    comptime {
+        for (audio_playback_decls) |n| if (std.mem.eql(u8, n, name)) return .playback;
+        for (audio_loader_decls) |n| if (std.mem.eql(u8, n, name)) return .loader;
+        @compileError("audioSubSurfaceOf: '" ++ name ++ "' is not a known audio decl");
+    }
+}
+
 /// Comptime-validated audio interface.
 /// The assembler provides the concrete Impl (raylib, sokol, miniaudio, etc.).
 /// Both engine and plugins use this for zero-cost dispatch.
 pub fn AudioInterface(comptime Impl: type) type {
-    comptime {
-        if (!@hasDecl(Impl, "playSound")) @compileError("Audio impl must define 'playSound'");
-        if (!@hasDecl(Impl, "stopSound")) @compileError("Audio impl must define 'stopSound'");
-    }
+    comptime assertAudio(Impl);
 
     return struct {
         pub const Implementation = Impl;

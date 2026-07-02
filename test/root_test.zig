@@ -1651,6 +1651,78 @@ test "assertInput: complete impl accepted, incomplete impl reported" {
     try testing.expect(saw_pressed);
 }
 
+test "assertAudio: complete impl accepted, incomplete impl reported" {
+    // The reference stub satisfies the contract → no missing decls.
+    try testing.expectEqual(@as(usize, 0), comptime root.missingAudioDecls(root.StubAudio).len);
+
+    // Audio is permissive: a required-only impl (no loader/music/global) still
+    // satisfies the contract — those degrade via AudioInterface's fallbacks.
+    const MinimalAudio = struct {
+        pub fn playSound(_: u32) void {}
+        pub fn stopSound(_: u32) void {}
+    };
+    try testing.expectEqual(@as(usize, 0), comptime root.missingAudioDecls(MinimalAudio).len);
+    // And it instantiates through the interface (assertAudio passes).
+    _ = root.AudioInterface(MinimalAudio);
+
+    // Missing a required decl (stopSound) → reported, not silent.
+    const Incomplete = struct {
+        pub fn playSound(_: u32) void {}
+    };
+    const missing = comptime root.missingAudioDecls(Incomplete);
+    try testing.expect(missing.len > 0);
+    var saw_stop = false;
+    inline for (missing) |name| {
+        if (std.mem.eql(u8, name, "stopSound")) saw_stop = true;
+    }
+    try testing.expect(saw_stop);
+}
+
+test "audio sub-surface split: playback/loader arrays are disjoint and total" {
+    @setEvalBranchQuota(10000); // nested comptime membership + audioSubSurfaceOf walks
+
+    // No decl appears in both sub-surfaces (disjoint).
+    inline for (root.audio_playback_decls) |p| {
+        inline for (root.audio_loader_decls) |l| {
+            try testing.expect(!std.mem.eql(u8, p, l));
+        }
+    }
+
+    // Spot-check the classifier.
+    try testing.expectEqual(root.AudioSubSurface.playback, comptime root.audioSubSurfaceOf("playSound"));
+    try testing.expectEqual(root.AudioSubSurface.loader, comptime root.audioSubSurfaceOf("loadSound"));
+    try testing.expectEqual(root.AudioSubSurface.playback, comptime root.audioSubSurfaceOf("update"));
+    try testing.expectEqual(root.AudioSubSurface.loader, comptime root.audioSubSurfaceOf("unloadMusic"));
+
+    // Every array member classifies back to its own array.
+    inline for (root.audio_playback_decls) |name| {
+        try testing.expectEqual(root.AudioSubSurface.playback, comptime root.audioSubSurfaceOf(name));
+    }
+    inline for (root.audio_loader_decls) |name| {
+        try testing.expectEqual(root.AudioSubSurface.loader, comptime root.audioSubSurfaceOf(name));
+    }
+
+    // Every required decl is a playback decl (both required decls drive
+    // already-loaded ids). required_audio_decls ⊂ audio_playback_decls.
+    inline for (root.required_audio_decls) |req| {
+        var found = false;
+        inline for (root.audio_playback_decls) |p| {
+            if (std.mem.eql(u8, req, p)) found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "required_audio_decls is frozen order (byte-identical diagnostics)" {
+    // assertAudio walks this array, so its compile-error text is stable only if
+    // this order never drifts. Freeze the exact sequence.
+    const expected = [_][]const u8{ "playSound", "stopSound" };
+    try testing.expectEqual(expected.len, root.required_audio_decls.len);
+    inline for (expected, 0..) |name, i| {
+        try testing.expect(std.mem.eql(u8, name, root.required_audio_decls[i]));
+    }
+}
+
 test "assertBackend: complete impl accepted, incomplete impl reported" {
     // The reference impl satisfies the contract → no missing decls.
     try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(MockBackend).len);

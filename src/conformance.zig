@@ -588,7 +588,7 @@ pub fn runInputSuite(comptime Impl: type) !void {
 /// real loader with no fixture skips the file-backed smoke — the old code read a
 /// hard-coded `conformance.wav`/`.ogg` that only a byte-ignoring stub tolerated.
 pub fn runAudioSuite(comptime Impl: type) !void {
-    const A = AudioInterface(Impl); // re-runs the playSound/stopSound gate.
+    const A = AudioInterface(Impl); // re-runs assertAudio.
 
     // ── Fallback semantics (BEHAVIORAL — no device or file needed) ──
     // A backend that omits a capability must degrade to a safe default; these

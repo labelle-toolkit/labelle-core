@@ -116,6 +116,21 @@ pub const MockBackend = struct {
         color: Color,
     };
 
+    /// Blend mode for the optional `drawMesh` primitive (labelle-gfx#290),
+    /// re-exported so tests can assert the recorded value.
+    pub const BlendMode = backend_mod.BlendMode;
+
+    /// One `drawMesh` call. The backend receives borrowed slices whose lifetime
+    /// ends with the call, so we record the vertex/index COUNTS plus the texture
+    /// and blend mode rather than copying the buffers — enough for tests to
+    /// assert a textured mesh was submitted with the expected geometry size.
+    pub const MeshCall = struct {
+        texture_id: u32,
+        vertex_count: usize,
+        index_count: usize,
+        blend: BlendMode,
+    };
+
     threadlocal var draw_calls_list: std.ArrayListUnmanaged(DrawCall) = .empty;
     threadlocal var shape_calls_list: std.ArrayListUnmanaged(ShapeCall) = .empty;
     threadlocal var circle_calls_list: std.ArrayListUnmanaged(CircleCall) = .empty;
@@ -123,6 +138,7 @@ pub const MockBackend = struct {
     threadlocal var triangle_calls_list: std.ArrayListUnmanaged(TriangleCall) = .empty;
     threadlocal var polygon_calls_list: std.ArrayListUnmanaged(PolygonCall) = .empty;
     threadlocal var text_calls_list: std.ArrayListUnmanaged(TextCall) = .empty;
+    threadlocal var mesh_calls_list: std.ArrayListUnmanaged(MeshCall) = .empty;
     threadlocal var allocator_ref: ?std.mem.Allocator = null;
     threadlocal var screen_width_val: i32 = 800;
     threadlocal var screen_height_val: i32 = 600;
@@ -160,6 +176,7 @@ pub const MockBackend = struct {
         triangle_calls_list = .empty;
         polygon_calls_list = .empty;
         text_calls_list = .empty;
+        mesh_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
         texture_counter = 1;
@@ -177,6 +194,7 @@ pub const MockBackend = struct {
             triangle_calls_list.deinit(alloc);
             polygon_calls_list.deinit(alloc);
             text_calls_list.deinit(alloc);
+            mesh_calls_list.deinit(alloc);
             camera_passes_list.deinit(alloc);
             viewport_calls_list.deinit(alloc);
         }
@@ -187,6 +205,7 @@ pub const MockBackend = struct {
         triangle_calls_list = .empty;
         polygon_calls_list = .empty;
         text_calls_list = .empty;
+        mesh_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
         allocator_ref = null;
@@ -200,6 +219,7 @@ pub const MockBackend = struct {
         triangle_calls_list.clearRetainingCapacity();
         polygon_calls_list.clearRetainingCapacity();
         text_calls_list.clearRetainingCapacity();
+        mesh_calls_list.clearRetainingCapacity();
         camera_passes_list.clearRetainingCapacity();
         viewport_calls_list.clearRetainingCapacity();
         texture_counter = 1;
@@ -278,6 +298,14 @@ pub const MockBackend = struct {
 
     pub fn getTextCallCount() usize {
         return text_calls_list.items.len;
+    }
+
+    pub fn getMeshCalls() []const MeshCall {
+        return mesh_calls_list.items;
+    }
+
+    pub fn getMeshCallCount() usize {
+        return mesh_calls_list.items.len;
     }
 
     pub fn setScreenSize(width: i32, height: i32) void {
@@ -370,6 +398,27 @@ pub const MockBackend = struct {
                 .y = y,
                 .size = size,
                 .color = tint,
+            }) catch {};
+        }
+    }
+
+    /// Optional textured-mesh primitive (labelle-gfx#290). Records the texture,
+    /// vertex count (positions is xy pairs → len/2), index count, and blend mode
+    /// so tests can assert a mesh was submitted with the expected geometry size.
+    pub fn drawMesh(
+        texture: Texture,
+        positions: []const f32,
+        _: []const f32,
+        _: []const u32,
+        indices: []const u16,
+        blend: BlendMode,
+    ) void {
+        if (allocator_ref) |alloc| {
+            mesh_calls_list.append(alloc, .{
+                .texture_id = texture.id,
+                .vertex_count = positions.len / 2,
+                .index_count = indices.len,
+                .blend = blend,
             }) catch {};
         }
     }

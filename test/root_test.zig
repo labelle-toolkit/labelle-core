@@ -1865,6 +1865,103 @@ test "Backend: compressedDims reads dims from a compressed blob without decoding
     try testing.expectEqual(@as(?B.CompressedDims, null), B.compressedDims("ordinary-bytes"));
 }
 
+test "Backend: drawMesh optional primitive records via the mock backend" {
+    // labelle-gfx#290: the textured-mesh primitive (Spine enabler). The mock
+    // opts in by declaring `drawMesh`, so the wrapper forwards and the mock
+    // records the texture, vertex/index counts, and blend mode.
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    const tex = try B.loadTexture("atlas.png");
+
+    // A textured quad: 4 verts (xy pairs), 6 indices (two triangles).
+    const positions = [_]f32{ 0, 0, 32, 0, 32, 32, 0, 32 };
+    const uvs = [_]f32{ 0, 0, 1, 0, 1, 1, 0, 1 };
+    const colors = [_]u32{ 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+    const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
+    B.drawMesh(tex, &positions, &uvs, &colors, &indices, .additive);
+
+    const meshes = MockBackend.getMeshCalls();
+    try testing.expectEqual(@as(usize, 1), meshes.len);
+    try testing.expectEqual(@as(usize, 1), MockBackend.getMeshCallCount());
+    try testing.expectEqual(tex.id, meshes[0].texture_id);
+    try testing.expectEqual(@as(usize, 4), meshes[0].vertex_count);
+    try testing.expectEqual(@as(usize, 6), meshes[0].index_count);
+    try testing.expectEqual(MockBackend.BlendMode.additive, meshes[0].blend);
+    try testing.expectEqual(root.BlendMode.additive, meshes[0].blend);
+}
+
+test "Backend: drawMesh is a no-op (non-breaking) on a backend lacking it" {
+    // A backend that satisfies the required render surface but does NOT declare
+    // `drawMesh` still instantiates through `Backend(Impl)`, and the wrapper
+    // compiles to a no-op call — proving the optional primitive is non-breaking
+    // for the four backends that don't implement it yet.
+    const NoMesh = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1 };
+        const C = @This().Color;
+
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 1, .height = 1 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{ .id = 2 };
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+    };
+
+    // No drawMesh decl → the contract still accepts the backend (optional).
+    try testing.expect(!@hasDecl(NoMesh, "drawMesh"));
+    try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(NoMesh).len);
+
+    const B = Backend(NoMesh);
+    const tex = try B.loadTexture("x.png");
+    const positions = [_]f32{ 0, 0, 1, 0, 1, 1 };
+    const uvs = [_]f32{ 0, 0, 1, 0, 1, 1 };
+    const colors = [_]u32{ 0, 0, 0 };
+    const indices = [_]u16{ 0, 1, 2 };
+    // Compiles and is a no-op (the @hasDecl gate elides the forward).
+    B.drawMesh(tex, &positions, &uvs, &colors, &indices, .multiply);
+}
+
 // ---------------------------------------------------------------------------
 // Behavioral conformance suites (labelle-assembler#453).
 //

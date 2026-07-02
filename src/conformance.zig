@@ -308,6 +308,18 @@ pub fn runRenderSuite(comptime Impl: type) !void {
         B.drawText("hi", 0, 0, 12, B.white);
         B.drawRectangleLinesEx(rect, 1, B.white);
         B.drawCircleLines(0, 0, 5, B.white);
+
+        // Optional textured-mesh primitive (labelle-gfx#290, capability-gated).
+        // A backend that declares `drawMesh` must link + accept a valid indexed
+        // mesh (a single textured quad here). Backends that omit it skip this —
+        // the wrapper is a no-op for them, which the minimal-backend suite pins.
+        if (comptime @hasDecl(Impl, "drawMesh")) {
+            const positions = [_]f32{ 0, 0, 10, 0, 10, 10, 0, 10 };
+            const uvs = [_]f32{ 0, 0, 1, 0, 1, 1, 0, 1 };
+            const colors = [_]u32{ 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+            const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
+            B.drawMesh(tex, &positions, &uvs, &colors, &indices, .normal);
+        }
     }
 
     // ── Compressed-texture capability (SHAPE-ONLY, capability-gated) ──

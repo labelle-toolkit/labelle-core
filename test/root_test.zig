@@ -1719,7 +1719,7 @@ test "required_audio_decls is frozen order (byte-identical diagnostics)" {
     const expected = [_][]const u8{ "playSound", "stopSound" };
     try testing.expectEqual(expected.len, root.required_audio_decls.len);
     inline for (expected, 0..) |name, i| {
-        try testing.expect(std.mem.eql(u8, name, root.required_audio_decls[i]));
+        try testing.expectEqualStrings(name, root.required_audio_decls[i]);
     }
 }
 

@@ -464,9 +464,9 @@ fn runFontChecks(comptime Impl: type, comptime B: type) !void {
 /// Behavioral conformance for the window contract (`Window(Impl)`).
 ///
 /// BEHAVIORAL (asserted): capability-probe truthfulness (`ownsLoop`/
-/// `canScreenshot` must agree with `@hasDecl`), the `shouldQuit`/`isFullscreen`
-/// fallback semantics for callback-model backends, `frameDuration` sign, and
-/// dimension-read stability.
+/// `canScreenshot`/`supportsSurfaceLoss` must agree with `@hasDecl`), the
+/// `shouldQuit`/`isFullscreen` fallback semantics for callback-model backends,
+/// `frameDuration` sign, and dimension-read stability.
 ///
 /// SHAPE-ONLY: `requestQuit`/`setFullscreen`/`setVsync` are called to prove
 /// they link + no-op safely; `takeScreenshot` is NOT called (it would touch the
@@ -479,6 +479,11 @@ pub fn runWindowSuite(comptime Impl: type) !void {
     // disagrees with reality would mislead the splice's loop-vs-callback choice.
     try testing.expectEqual(@hasDecl(Impl, "shouldQuit"), W.ownsLoop());
     try testing.expectEqual(@hasDecl(Impl, "takeScreenshot"), W.canScreenshot());
+    // supportsSurfaceLoss must not lie: it means "declares BOTH hooks".
+    try testing.expectEqual(
+        @hasDecl(Impl, "surfaceLost") and @hasDecl(Impl, "surfaceRestored"),
+        W.supportsSurfaceLoss(),
+    );
 
     // ── Callback-model fallbacks (BEHAVIORAL) ──
     // A callback backend (no shouldQuit) must report "keep running" (false) —
@@ -504,6 +509,16 @@ pub fn runWindowSuite(comptime Impl: type) !void {
     W.setFullscreen(false);
     W.requestQuit();
     // takeScreenshot intentionally NOT called (filesystem + real surface).
+
+    // ── Surface-loss no-op fallback (SHAPE-ONLY smoke) ──
+    // Only exercisable for a backend that does NOT declare the pair: the
+    // wrappers must link and no-op. A backend that DOES declare them is NOT
+    // driven here — a real surfaceRestored needs a live GPU surface (same
+    // reason takeScreenshot above is not called).
+    if (comptime !@hasDecl(Impl, "surfaceLost")) {
+        W.surfaceLost();
+        W.surfaceRestored();
+    }
 }
 
 // ── Input suite ──────────────────────────────────────────────────────────────

@@ -45,6 +45,13 @@ pub const validateComponentTuple = ecs.validateComponentTuple;
 
 pub const AudioInterface = audio.AudioInterface;
 pub const StubAudio = audio.StubAudio;
+pub const assertAudio = audio.assertAudio;
+pub const missingAudioDecls = audio.missingAudioDecls;
+pub const required_audio_decls = audio.required_audio_decls;
+pub const AudioSubSurface = audio.AudioSubSurface;
+pub const audioSubSurfaceOf = audio.audioSubSurfaceOf;
+pub const audio_playback_decls = audio.audio_playback_decls;
+pub const audio_loader_decls = audio.audio_loader_decls;
 // Per-sub-surface contract versions (labelle-assembler#453). See the ABI-home
 // files for what a bump means.
 pub const AUDIO_PLAYBACK_CONTRACT_VERSION = audio.AUDIO_PLAYBACK_CONTRACT_VERSION;

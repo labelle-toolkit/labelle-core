@@ -138,6 +138,20 @@ pub const DecodedFont = struct {
     kerning: []const KernPair,
 };
 
+/// Blend mode for the `drawMesh` textured-mesh primitive (draw sub-surface).
+/// Mirrors the four blend modes a Spine skeleton attachment can request, so the
+/// planned `labelle-spine` binding maps `spBlendMode` straight onto this enum
+/// (labelle-gfx#290). Also useful for particles / deformation / custom meshes.
+///
+///   - `normal`   — standard src-alpha over.
+///   - `additive` — src added to dst (glows, fire, energy).
+///   - `multiply` — src multiplied with dst (shadows, tint darkening).
+///   - `screen`   — inverse-multiply lighten.
+///
+/// A backend that only supports `normal` may treat the others as `normal` —
+/// a quality degradation, not a contract violation.
+pub const BlendMode = enum { normal, additive, multiply, screen };
+
 // ── Contract versions ───────────────────────────────────────────────────────
 //
 // Per-sub-surface contract-version integers (labelle-assembler#453, RFC
@@ -493,6 +507,41 @@ pub fn Backend(comptime Impl: type) type {
         /// `drawLine` path in the retained-engine draw helper instead.
         pub inline fn drawPolygon(points: []const Vector2, tint: Color) void {
             Impl.drawPolygon(points, tint);
+        }
+
+        /// Textured triangle-mesh primitive — the load-bearing enabler for
+        /// skeletal animation (Spine, labelle-gfx#290), and reusable for
+        /// particles / mesh deformation / custom geometry. Draws an indexed
+        /// triangle list sampling `texture`, with per-vertex UV **and**
+        /// per-vertex color, under blend mode `blend`.
+        ///
+        /// The buffers mirror Spine's `RenderCommand` so the binding is a
+        /// straight pass-through — no per-vertex struct repacking:
+        ///   - `positions`: xy pairs in world/screen space (already
+        ///     position+scale-applied by the caller). `len == 2 * numVerts`.
+        ///   - `uvs`: uv pairs, normalised [0,1] into `texture`.
+        ///     `len == 2 * numVerts`, parallel to `positions`.
+        ///   - `colors`: per-vertex RGBA8 packed one-u32-per-vertex (a tint
+        ///     multiplied with the sampled texel). `len == numVerts`.
+        ///   - `indices`: triangle list into the vertex arrays (every 3 forms
+        ///     one triangle). `len == 3 * numTris`.
+        ///
+        /// OPTIONAL primitive: a backend opts in by declaring `pub fn
+        /// drawMesh(...)`. Backends that don't (raylib/sokol/wgpu/sdl today)
+        /// omit it and this wrapper compiles to a no-op — adding it is
+        /// non-breaking, so `DRAW_CONTRACT_VERSION` does NOT bump. The bgfx
+        /// implementation lands in a follow-up (labelle-gfx#290).
+        pub inline fn drawMesh(
+            texture: Texture,
+            positions: []const f32,
+            uvs: []const f32,
+            colors: []const u32,
+            indices: []const u16,
+            blend: BlendMode,
+        ) void {
+            if (@hasDecl(Impl, "drawMesh")) {
+                Impl.drawMesh(texture, positions, uvs, colors, indices, blend);
+            }
         }
 
         pub inline fn drawRectangleLinesEx(rec: Rectangle, line_thick: f32, tint: Color) void {

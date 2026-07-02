@@ -109,6 +109,8 @@ pub const MissingDecl = backend_contract.MissingDecl;
 pub const draw_fn_decls = backend_contract.draw_fn_decls;
 pub const loader_fn_decls = backend_contract.loader_fn_decls;
 pub const required_fn_decls = backend_contract.required_fn_decls;
+// Blend mode for the optional `drawMesh` textured-mesh primitive (labelle-gfx#290).
+pub const BlendMode = backend_contract.BlendMode;
 // Render-contract versions: the two named sub-surfaces + the composite.
 pub const DRAW_CONTRACT_VERSION = backend_contract.DRAW_CONTRACT_VERSION;
 pub const LOADER_CONTRACT_VERSION = backend_contract.LOADER_CONTRACT_VERSION;

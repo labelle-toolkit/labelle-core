@@ -42,10 +42,25 @@ pub fn Ecs(comptime Backend: type) type {
         }
 
         pub fn get(self: Self, entity: Entity, comptime T: type) ?*T {
+            // labelle-core#59: an entity id carried in an event payload (e.g. a
+            // flows `entity_created` tick handler calling `getComponent(
+            // payload.entity, C)`) may be DEAD or RECYCLED by the time it is
+            // read — the entity was destroyed after the event fired. Forwarding
+            // such an id straight into the backend's `getComponent` derefs its
+            // unchecked `alive`/sparse-set lookup and segfaults (the Mock's
+            // `AutoHashMap` is safe for any key, but a real backend indexes by
+            // id and reads out of bounds / a stale slot). `entityExists` is the
+            // contract's SAFE validity probe — a real backend bounds-checks
+            // id+generation there — so gate on it first and return null for a
+            // dead/never-valid id instead of crashing.
+            if (!self.backend.entityExists(entity)) return null;
             return self.backend.getComponent(entity, T);
         }
 
         pub fn has(self: Self, entity: Entity, comptime T: type) bool {
+            // Same #59 guard as `get`: `has` on a dead/recycled/never-valid id
+            // must not deref the backend's unchecked lookup either.
+            if (!self.backend.entityExists(entity)) return false;
             return self.backend.hasComponent(entity, T);
         }
 

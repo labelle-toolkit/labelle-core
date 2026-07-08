@@ -415,6 +415,168 @@ test "MockEcsBackend: entityCount tracks alive entities" {
     try testing.expectEqual(1, e.entityCount());
 }
 
+/// Regression backend for labelle-core#59.
+///
+/// Models a "real" ECS backend (e.g. the zig_ecs wrapper) whose `getComponent`
+/// does an UNCHECKED lookup: on a dead / recycled / never-valid entity id it
+/// reads a stale sparse-set slot and hands back a use-after-free pointer — the
+/// segfault the issue reports when a flows `entity_created` tick handler calls
+/// `getComponent(payload.entity, C)` after the entity was destroyed.
+///
+/// Unlike `MockEcsBackend` — whose `AutoHashMap`-backed `alive.contains` is safe
+/// for ANY key and so already returns null — here `entityExists` is the ONLY
+/// safe validity probe and reaching `getComponent`/`hasComponent` with a dead id
+/// IS the bug. So the test process survives even when the guard is ABSENT (a
+/// clean assertion failure, not a crashed runner), the "unsafe" branch does not
+/// literally deref freed memory: it bumps `dead_lookups` and returns the stale
+/// (non-null) pointer that lingers in `storage`. The regression test then proves
+/// the core-side guard in `Ecs.get()`/`Ecs.has()` routed AROUND that branch
+/// (`dead_lookups == 0`, null/false returned). Without the guard, `get()` falls
+/// straight through and returns the stale pointer — the exact use-after-free.
+fn Issue59SpyBackend(comptime Comp: type) type {
+    return struct {
+        pub const Entity = u32;
+
+        next_id: Entity = 1,
+        alive: std.AutoHashMap(Entity, void),
+        // Deliberately NOT cleared on destroy: models a sparse-set slot that
+        // lingers after the entity dies, so an unchecked read returns a stale
+        // (use-after-free) pointer rather than a clean null.
+        storage: std.AutoHashMap(Entity, Comp),
+        dead_lookups: usize = 0,
+
+        const Self = @This();
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .alive = std.AutoHashMap(Entity, void).init(allocator),
+                .storage = std.AutoHashMap(Entity, Comp).init(allocator),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.alive.deinit();
+            self.storage.deinit();
+        }
+
+        pub fn createEntity(self: *Self) Entity {
+            const id = self.next_id;
+            self.next_id += 1;
+            self.alive.put(id, {}) catch @panic("OOM");
+            return id;
+        }
+
+        pub fn destroyEntity(self: *Self, entity: Entity) void {
+            _ = self.alive.remove(entity); // storage slot intentionally lingers
+        }
+
+        pub fn entityExists(self: *Self, entity: Entity) bool {
+            return self.alive.contains(entity); // the SAFE validity probe
+        }
+
+        pub fn entityCount(self: *Self) usize {
+            return self.alive.count();
+        }
+
+        pub fn addComponent(self: *Self, entity: Entity, component: Comp) void {
+            self.storage.put(entity, component) catch @panic("OOM");
+        }
+
+        /// UNCHECKED read — the crash surface. A conformant caller must have
+        /// validated `entity` first (which the fixed `Ecs.get()` now does).
+        pub fn getComponent(self: *Self, entity: Entity, comptime T: type) ?*T {
+            comptime std.debug.assert(T == Comp);
+            if (!self.alive.contains(entity)) {
+                // In a real backend this branch derefs freed memory / an
+                // out-of-range slot and segfaults. Record it instead so the
+                // guard's effect is observable without crashing the runner.
+                self.dead_lookups += 1;
+            }
+            return self.storage.getPtr(entity);
+        }
+
+        pub fn hasComponent(self: *Self, entity: Entity, comptime T: type) bool {
+            comptime std.debug.assert(T == Comp);
+            if (!self.alive.contains(entity)) self.dead_lookups += 1;
+            return self.storage.contains(entity);
+        }
+
+        pub fn removeComponent(self: *Self, entity: Entity, comptime T: type) void {
+            comptime std.debug.assert(T == Comp);
+            _ = self.storage.remove(entity);
+        }
+
+        // ── Trait decls required by Ecs() but not exercised by this test ──
+        // (present so `Ecs(Issue59SpyBackend(..))` satisfies the comptime
+        // contract; never called, so the bodies are intentionally trivial).
+        pub fn View(comptime includes: anytype, comptime excludes: anytype) type {
+            _ = includes;
+            _ = excludes;
+            return struct {
+                pub fn next(_: *@This()) ?Entity {
+                    return null;
+                }
+                pub fn deinit(_: *@This()) void {}
+            };
+        }
+
+        pub fn view(self: *Self, comptime includes: anytype, comptime excludes: anytype) View(includes, excludes) {
+            _ = self;
+            return .{};
+        }
+
+        pub fn QueryIterator(comptime components: anytype) type {
+            _ = components;
+            return struct {
+                pub fn next(_: *@This()) ?Entity {
+                    return null;
+                }
+                pub fn deinit(_: *@This()) void {}
+            };
+        }
+
+        pub fn query(self: *Self, comptime components: anytype) QueryIterator(components) {
+            _ = self;
+            return .{};
+        }
+    };
+}
+
+test "Ecs.get/has on a destroyed or never-valid entity id returns null without an unsafe backend lookup (labelle-core#59)" {
+    const Marker = struct { tag: u32 };
+    var backend = Issue59SpyBackend(Marker).init(testing.allocator);
+    defer backend.deinit();
+
+    const e = Ecs(Issue59SpyBackend(Marker)){ .backend = &backend };
+
+    const entity = e.createEntity();
+    e.add(entity, Marker{ .tag = 7 });
+
+    // Live entity: the normal read path still works (and takes no dead lookup).
+    try testing.expectEqual(@as(u32, 7), e.get(entity, Marker).?.tag);
+    try testing.expect(e.has(entity, Marker));
+
+    // Destroy it. The sparse-set slot lingers (modelling the real backend), so
+    // an UNGUARDED getComponent would return the stale use-after-free pointer.
+    e.destroyEntity(entity);
+    try testing.expect(!e.entityExists(entity));
+
+    // The #59 crash path: reading the now-dead id (as an event payload would).
+    // The core-side guard must short-circuit on `entityExists` and return
+    // null/false WITHOUT calling the backend's unchecked lookup.
+    try testing.expect(e.get(entity, Marker) == null);
+    try testing.expect(!e.has(entity, Marker));
+
+    // The other "id shape from a payload" case: a never-valid / fabricated id.
+    try testing.expect(e.get(9999, Marker) == null);
+    try testing.expect(!e.has(9999, Marker));
+
+    // Proof the guard routed AROUND the crash surface: the unsafe branch a real
+    // backend segfaults in was never entered. Without the fix this is non-zero
+    // (and `e.get(entity, Marker)` above would have returned the stale pointer).
+    try testing.expectEqual(@as(usize, 0), backend.dead_lookups);
+}
+
 test "MockEcsBackend: view iterates entities with matching components" {
     var backend = MockEcsBackend(u32).init(testing.allocator);
     defer backend.deinit();

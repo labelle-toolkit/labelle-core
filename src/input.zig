@@ -179,6 +179,13 @@ pub fn InputInterface(comptime Impl: type) type {
         /// Drain pending hotplug (connect/disconnect) events into `out`.
         /// Returns the number of events written (never more than `out.len`).
         /// A backend Impl declares: `pub fn pollGamepadEvents(out: []GamepadEvent) usize`.
+        ///
+        /// Edge-ack invariant (core#24): the Impl must advance/ack a
+        /// connect/disconnect edge ONLY once it has written that event to
+        /// `out`. When `out` fills before an edge is emitted, the Impl must
+        /// leave its per-slot "previously seen" state un-advanced so the
+        /// undelivered edge re-fires on the next drain — never drop a
+        /// transition just because the buffer was full. See `GamepadEvent`.
         pub inline fn pollGamepadEvents(out: []GamepadEvent) usize {
             if (@hasDecl(Impl, "pollGamepadEvents")) return Impl.pollGamepadEvents(out);
             return 0;

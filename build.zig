@@ -29,11 +29,34 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Host collector for the per-OS gamepad_source platform files' OWN `test`
+    // blocks (labelle-core#23, epic #609). The selector in
+    // `gamepad_source/root.zig` only compiles ONE platform file per target — on
+    // the host that's `unsupported.zig` — so android/ios/linux/wasm never get
+    // analysed by the `tests` artifact above and their host-runnable pure-logic
+    // unit tests (classifySources, makeGuid, typeHintFromId, normalizeAxis, the
+    // WASM connect/disconnect diffing, ...) never ran under `zig build test`.
+    //
+    // Every platform file compiles on any target (native code is gated behind a
+    // comptime `is_<platform>` branch / a Fallback|Stub `Source`), so building
+    // this collector for the HOST runs exactly the pure-logic test blocks while
+    // the native bodies stay out of the taken branch. Those native paths remain
+    // covered by the foreign-target `check-platforms` compile-check below.
+    const platform_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gamepad_source_platform_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const run_tests = b.addRunArtifact(tests);
     const run_root_tests = b.addRunArtifact(root_tests);
+    const run_platform_tests = b.addRunArtifact(platform_tests);
     const test_step = b.step("test", "Run labelle-core tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_root_tests.step);
+    test_step.dependOn(&run_platform_tests.step);
 
     // --- Cross-compile platform compile-checks (labelle-core#23, epic #609) ---
     //

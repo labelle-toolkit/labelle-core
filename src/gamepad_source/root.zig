@@ -18,6 +18,12 @@
 //!     pub fn deinit() void {}                // optional (@hasDecl-guarded)
 //!     /// Drain pending hotplug events into `out`; return the count written
 //!     /// (never more than `out.len`). Stubs return 0.
+//!     ///
+//!     /// Edge-ack invariant (core#24): advance/ack a connect/disconnect
+//!     /// edge ONLY after writing it to `out`. If `out` fills first, leave
+//!     /// the per-slot "previously seen" state un-advanced so the undelivered
+//!     /// edge re-fires on the next drain — never drop a transition because
+//!     /// the buffer was full. See `GamepadEvent` in `../gamepad.zig`.
 //!     pub fn pollEvents(out: []GamepadEvent) usize { return 0; }
 //!     /// Optional diagnostic enumeration (mirrors describeGamepads).
 //!     pub fn describe(out: []GamepadDescription) usize { return 0; } // optional
@@ -98,6 +104,11 @@ pub fn deinit() void {
 
 /// Drain pending hotplug events from the selected OS source.
 /// Returns the number of events written to `out` (0 on stub platforms).
+///
+/// Per-OS `Source.pollEvents` implementations must uphold the edge-ack
+/// invariant (core#24): only advance/ack a connect/disconnect edge after it
+/// is written to `out`, so an undelivered edge (full buffer) re-fires on the
+/// next drain instead of being dropped. See the module doc and `GamepadEvent`.
 pub fn pollEvents(out: []GamepadEvent) usize {
     return Source.pollEvents(out);
 }

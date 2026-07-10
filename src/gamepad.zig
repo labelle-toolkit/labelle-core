@@ -87,6 +87,21 @@ pub const UnavailableReason = enum(u8) {
 /// alias the same value). `name`/`name_len` carry an inline bounded string
 /// (empty when the backend can't supply one). `guid` is a stable
 /// reconnection key when the backend exposes one.
+///
+/// ## Edge-ack invariant (producers MUST uphold — core#24)
+///
+/// A producer detects a connect/disconnect by comparing a slot's live state
+/// against a per-slot "previously seen" state, and emits one `GamepadEvent`
+/// per transition. It MUST advance/ack that per-slot state ONLY once it has
+/// actually written the event into the drain buffer (`out`). If the buffer
+/// is full and the event cannot be written, the "previously seen" state must
+/// stay un-advanced so the undelivered edge RE-FIRES on the next drain —
+/// never silently drop a transition because `out` had no room.
+///
+/// Rationale: three independent backends (raylib #246, iOS #251, engine FIFO
+/// #610) all made the same slip — advancing the seen-state even when the
+/// out-buffer was full, losing the transition forever. Producers must treat
+/// "written to `out`" as the sole commit point for acking an edge.
 pub const GamepadEvent = struct {
     pub const Kind = enum(u8) { connected, disconnected };
 

@@ -246,6 +246,144 @@ pub fn materialCapabilities(comptime Impl: type) MaterialCapabilities {
     }
 }
 
+// ── Render-target sub-surface (post-fx foundation, labelle-gfx#305) ──────────
+// Render-to-target already exists as ad-hoc `@hasDecl` probes at the gfx layer
+// (the `game.*RenderTarget` forwarders, engine 1.82/1.83 — transport mirror +
+// headless capture). RFC §2.1 promotes them into the formal contract as a
+// NAMED OPTIONAL sub-surface so they are versioned, discoverable, and
+// negotiable — the contracted floor the post-fx stack stands on. Like the
+// material seam, these are `@hasDecl`-gated + OPTIONAL: a backend without render
+// targets simply has no post-fx, and NONE of the `*_CONTRACT_VERSION` numbers
+// bump. NOT reached by `missingBackendDecls`/`assertBackend` (they stay
+// required-only, byte-identical); the paired-unit consistency ("all five or
+// none") is a SEPARATE optional check (`missingRenderTargetDecls`).
+
+/// A backend-native offscreen render-target handle. Plain `u32` — the same
+/// opaque-handle shape the `game.*RenderTarget` forwarders already pass STRAIGHT
+/// THROUGH (no catalog mapping), and what `applyPostPass` reads/writes. `0` is
+/// the reserved INVALID handle (a backend without render targets returns it).
+pub const RenderTargetId = u32;
+
+/// The five decls that make up the OPTIONAL render-target sub-surface. A backend
+/// opts in by declaring ALL five; declaring a proper subset is an optional-
+/// consistency error (a backend with `createRenderTarget` but no
+/// `drawRenderTarget` can't composite) surfaced by `missingRenderTargetDecls`.
+pub const render_target_fn_decls = [_][]const u8{
+    "createRenderTarget", "beginRenderTarget", "endRenderTarget",
+    "drawRenderTarget",   "destroyRenderTarget",
+};
+
+/// True iff `Impl` implements the WHOLE render-target sub-surface (all five
+/// decls). The post-fx stack's whole-seam gate: false ⇒ the stack is a no-op
+/// (warn-once at init), the frame renders straight to the backbuffer.
+pub fn hasRenderTargetSubSurface(comptime Impl: type) bool {
+    comptime {
+        for (render_target_fn_decls) |name| if (!@hasDecl(Impl, name)) return false;
+        return true;
+    }
+}
+
+/// Optional-consistency check for the render-target sub-surface (the "all five
+/// or none" rule, mirroring the `isCompressed`+`uploadCompressed` paired unit).
+/// Returns empty when `Impl` declares ALL five OR NONE of the five (both are
+/// valid); returns the missing decls tagged `.render_target` only for a partial
+/// implementation. Deliberately NOT part of `missingBackendDecls`/
+/// `assertBackend` — a fully-absent render-target sub-surface is not a contract
+/// violation, just "no post-fx". Consumed by negotiation/diagnostics, not the
+/// required-decl gate.
+pub fn missingRenderTargetDecls(comptime Impl: type) []const MissingDecl {
+    comptime {
+        var present: usize = 0;
+        for (render_target_fn_decls) |name| {
+            if (@hasDecl(Impl, name)) present += 1;
+        }
+        // All present or all absent → consistent, nothing to report.
+        if (present == 0 or present == render_target_fn_decls.len) return &.{};
+        var missing: []const MissingDecl = &.{};
+        for (render_target_fn_decls) |name| {
+            if (!@hasDecl(Impl, name)) {
+                missing = missing ++ [_]MissingDecl{.{ .name = name, .sub_surface = .render_target }};
+            }
+        }
+        return missing;
+    }
+}
+
+// ── Post-fx seam (full-screen pass stack, labelle-gfx#305) ───────────────────
+// The ping-pong is orchestrated by gfx (RFC §2.4); the backend only implements
+// a SINGLE pass reading one render target and writing another. Same optional,
+// `@hasDecl`-gated, degrade-with-warn-once shape as the material seam — no
+// version bump. Value types are purely additive flat `extern struct`s (RFC §2.2,
+// §9 Q5 — NOT `extern union`, the marshal-seam-safe shape every contract type
+// uses).
+
+/// Curated built-in full-screen post-fx pass (post-fx seam, labelle-gfx#305).
+/// The contract NAMES the pass; each backend owns its shader dialect + impl. v1
+/// is a FIXED set. A backend implements as many as it can via `applyPostPass`
+/// and declines the rest through the optional `postPassSupported` — the gfx
+/// driver SKIPS an unsupported pass (warn-once) and the remaining passes run.
+pub const PostPassKind = enum(u8) {
+    bloom,
+    vignette,
+    color_grade,
+    crt,
+};
+
+/// Per-pass uniform block — a FLAT `extern struct` (decided RFC §9 Q5, same
+/// marshal-seam rationale as `MaterialUniforms`: reinterpret-safe locked layout,
+/// zero `extern union` anywhere in the toolkit). The backend switches on
+/// `PostPass.kind` and reads the fields that pass uses (unused = 0).
+pub const PostPassUniforms = extern struct {
+    /// bloom: threshold · vignette: intensity · color_grade: strength ·
+    /// crt: curvature.
+    scalar0: f32 = 0,
+    /// bloom: intensity · vignette: radius · crt: scanline.
+    scalar1: f32 = 0,
+    /// bloom: radius · vignette: softness · crt: mask.
+    scalar2: f32 = 0,
+    /// crt: aberration · others: unused.
+    scalar3: f32 = 0,
+    /// vignette: tint color (linear 0..1). Other passes: unused.
+    r: f32 = 0,
+    g: f32 = 0,
+    b: f32 = 0,
+    /// color_grade: the LUT backend-texture handle (RFC §9 Q3 — a 2D unrolled
+    /// strip; 0 = no LUT → pass degrades to no-op). Others: unused.
+    aux_texture: u32 = 0,
+};
+
+/// One full-screen post-fx pass: a curated kind + its uniform block. Ordered
+/// into a stack the gfx driver composes via render-target ping-pong. Small +
+/// copyable; `extern struct` so the assembler-generated marshal seam is locked.
+pub const PostPass = extern struct {
+    kind: PostPassKind,
+    uniforms: PostPassUniforms = .{},
+};
+
+/// The curated post-fx passes a backend `Impl` advertises (see
+/// `postFxCapabilities`). Consumed by (a) the provider manifest `.capabilities`
+/// mirror (pluggable-backends), so a pass a game *declares* but the backend
+/// can't do surfaces as an early project-level note rather than a silent
+/// per-frame skip, and (b) the gfx driver's warn-once table.
+pub const PostFxCapabilities = struct { passes: []const PostPassKind };
+
+/// Which curated post-fx passes `Impl` advertises. Empty when the backend has no
+/// `applyPostPass` at all. When it declares `applyPostPass` but no fine-grained
+/// `postPassSupported`, it is taken to support every built-in pass. Comptime
+/// introspection — analogous to `materialCapabilities`; feeds negotiation/
+/// warn-once, NOT `assertBackend` (a skipped pass is never a contract violation).
+pub fn postFxCapabilities(comptime Impl: type) PostFxCapabilities {
+    comptime {
+        if (!@hasDecl(Impl, "applyPostPass")) return .{ .passes = &.{} };
+        var passes: []const PostPassKind = &.{};
+        for (std.enums.values(PostPassKind)) |kind| {
+            if (@hasDecl(Impl, "postPassSupported") and !Impl.postPassSupported(kind)) continue;
+            passes = passes ++ [_]PostPassKind{kind};
+        }
+        return .{ .passes = passes };
+    }
+}
+
 // ── Contract versions ───────────────────────────────────────────────────────
 //
 // Per-sub-surface contract-version integers (labelle-assembler#453, RFC
@@ -335,9 +473,13 @@ pub const required_color_decls = [_][]const u8{
 };
 
 /// Which named sub-surface a required decl belongs to. `draw` and `loader` are
-/// the two render sub-surfaces the file documents; `type` (required value
-/// types) and `color` (required color constants) are cross-cutting and reported
-/// under their own tags so the classification is total. Used by
+/// the two REQUIRED render sub-surfaces the file documents; `type` (required
+/// value types) and `color` (required color constants) are cross-cutting and
+/// reported under their own tags so the classification is total. `render_target`
+/// and `post_fx` are the two OPTIONAL sub-surfaces (labelle-gfx#305) — they are
+/// never returned by `subSurfaceOf`/`missingBackendDeclsBySubSurface` (which
+/// classify REQUIRED decls only), but they tag the OPTIONAL diagnostics
+/// (`missingRenderTargetDecls`) and document the seam. Used by
 /// `missingBackendDeclsBySubSurface` to tell a caller *where* a missing decl
 /// lives.
 pub const RenderSubSurface = enum {
@@ -345,6 +487,12 @@ pub const RenderSubSurface = enum {
     draw,
     loader,
     color,
+    /// Optional render-target sub-surface (`create/begin/end/draw/destroy
+    /// RenderTarget`) — the post-fx foundation (RFC §2.1).
+    render_target,
+    /// Optional post-fx sub-surface (`applyPostPass` + `postPassSupported`) —
+    /// the full-screen pass primitive (RFC §2.3).
+    post_fx,
 
     /// Stable lowercase tag ("draw"/"loader"/…), handy for prefixing a
     /// diagnostic message.
@@ -692,6 +840,83 @@ pub fn Backend(comptime Impl: type) type {
             if (!@hasDecl(Impl, "drawTextureProMaterial")) return false;
             if (effect == .none) return false;
             if (@hasDecl(Impl, "materialSupported")) return Impl.materialSupported(effect);
+            return true;
+        }
+
+        // ── Render-target sub-surface (post-fx foundation, labelle-gfx#305) ──
+        // The formal, contracted wrappers for the render-target sub-surface
+        // (RFC §2.1) — promoted here from the ad-hoc gfx-layer `@hasDecl` probes
+        // so the post-fx driver composes on a versioned floor. OPTIONAL: each is
+        // `@hasDecl`-gated, so a backend without render targets compiles and the
+        // whole post-fx stack degrades to a no-op (`hasRenderTargets()` false).
+        // Handles are backend-native `u32` (no catalog mapping) — the same
+        // straight-through convention as the `game.*RenderTarget` forwarders.
+
+        /// True iff `Impl` implements the whole render-target sub-surface. The
+        /// post-fx driver's whole-seam gate.
+        pub inline fn hasRenderTargets() bool {
+            return comptime hasRenderTargetSubSurface(Impl);
+        }
+
+        /// Create an offscreen render target `w`×`h` (design pixels). Returns a
+        /// backend-native handle, or `0` (INVALID) on a backend without the
+        /// sub-surface.
+        pub inline fn createRenderTarget(w: u16, h: u16) RenderTargetId {
+            if (@hasDecl(Impl, "createRenderTarget")) return Impl.createRenderTarget(w, h);
+            return 0;
+        }
+
+        /// Redirect subsequent draws into render target `id` (until
+        /// `endRenderTarget`). No-op on a backend without the sub-surface.
+        pub inline fn beginRenderTarget(id: RenderTargetId) void {
+            if (@hasDecl(Impl, "beginRenderTarget")) Impl.beginRenderTarget(id);
+        }
+
+        /// End the current render-target redirection (draws return to the
+        /// backbuffer). No-op on a backend without the sub-surface.
+        pub inline fn endRenderTarget() void {
+            if (@hasDecl(Impl, "endRenderTarget")) Impl.endRenderTarget();
+        }
+
+        /// Composite render target `id` to the current target at `dest` (SCREEN
+        /// space — top-left, Y-down, pixels), modulated by `tint`. No-op on a
+        /// backend without the sub-surface.
+        pub inline fn drawRenderTarget(id: RenderTargetId, dest: Rectangle, tint: Color) void {
+            if (@hasDecl(Impl, "drawRenderTarget")) Impl.drawRenderTarget(id, dest, tint);
+        }
+
+        /// Release render target `id`. No-op on a backend without the
+        /// sub-surface.
+        pub inline fn destroyRenderTarget(id: RenderTargetId) void {
+            if (@hasDecl(Impl, "destroyRenderTarget")) Impl.destroyRenderTarget(id);
+        }
+
+        // ── Post-fx pass primitive (labelle-gfx#305) ────────────────────────
+
+        /// Apply ONE full-screen post-fx pass: sample `src`, write `dst`, under
+        /// `pass`. `src`/`dst` are render-target handles from the render-target
+        /// sub-surface. OPTIONAL, mirroring `drawMesh`/`drawTextureProMaterial`:
+        /// a backend opts in with `pub fn applyPostPass(...)`. Two-level gating —
+        /// the coarse `@hasDecl` here, then the optional fine-grained
+        /// `postPassSupported(kind)` (absent ⇒ all built-ins). An unsupported
+        /// pass is a silent no-op here; the gfx DRIVER checks `postPassSupported`
+        /// itself so it can SKIP-without-advancing the ping-pong + warn-once.
+        /// Non-breaking; no version bump.
+        pub inline fn applyPostPass(pass: PostPass, src: RenderTargetId, dst: RenderTargetId) void {
+            if (@hasDecl(Impl, "applyPostPass")) {
+                if (@hasDecl(Impl, "postPassSupported") and !Impl.postPassSupported(pass.kind)) return;
+                Impl.applyPostPass(pass, src, dst);
+            }
+        }
+
+        /// True if `Impl` advertises the curated post-fx `kind`. Coarse gate
+        /// first (no `applyPostPass` ⇒ false for everything), then the optional
+        /// fine-grained `postPassSupported` (absent ⇒ all built-ins). Runtime-
+        /// callable mirror of the comptime `postFxCapabilities`, for the gfx
+        /// driver's per-pass skip branch + warn-once table.
+        pub inline fn postPassSupported(kind: PostPassKind) bool {
+            if (!@hasDecl(Impl, "applyPostPass")) return false;
+            if (@hasDecl(Impl, "postPassSupported")) return Impl.postPassSupported(kind);
             return true;
         }
 

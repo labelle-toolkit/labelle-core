@@ -147,6 +147,31 @@ pub const MockBackend = struct {
         material: Material,
     };
 
+    /// Post-fx value types for the full-screen pass-stack seam (labelle-gfx#305),
+    /// re-exported so tests can assert recorded pass kinds + ping-pong targets.
+    pub const RenderTargetId = backend_mod.RenderTargetId;
+    pub const PostPass = backend_mod.PostPass;
+    pub const PostPassKind = backend_mod.PostPassKind;
+    pub const PostPassUniforms = backend_mod.PostPassUniforms;
+
+    /// One created render target (from `createRenderTarget`), so a test can
+    /// assert the driver allocated its two ping-pong buffers (and NOT allocate
+    /// on the empty-stack zero-cost path).
+    pub const RenderTargetCall = struct {
+        id: RenderTargetId,
+        width: u16,
+        height: u16,
+    };
+
+    /// One `applyPostPass` call. Records the pass kind + the src/dst render-
+    /// target handles so a test can assert the gfx driver ping-ponged the
+    /// buffers in order (alternating src/dst) and skipped unsupported passes.
+    pub const PostPassCall = struct {
+        kind: PostPassKind,
+        src: RenderTargetId,
+        dst: RenderTargetId,
+    };
+
     threadlocal var draw_calls_list: std.ArrayListUnmanaged(DrawCall) = .empty;
     threadlocal var shape_calls_list: std.ArrayListUnmanaged(ShapeCall) = .empty;
     threadlocal var circle_calls_list: std.ArrayListUnmanaged(CircleCall) = .empty;
@@ -184,6 +209,17 @@ pub const MockBackend = struct {
     threadlocal var camera_passes_list: std.ArrayListUnmanaged(CameraPass) = .empty;
     threadlocal var viewport_calls_list: std.ArrayListUnmanaged(ViewportCall) = .empty;
 
+    // Post-fx / render-target recording (labelle-gfx#305). `render_target_counter`
+    // hands out distinct non-zero handles so a test can assert the driver's two
+    // ping-pong buffers are distinct. `active_render_target` tracks the current
+    // `beginRenderTarget` redirection (0 = backbuffer). `render_target_destroys`
+    // counts `destroyRenderTarget` so target-lifecycle tests can assert cleanup.
+    threadlocal var render_target_calls_list: std.ArrayListUnmanaged(RenderTargetCall) = .empty;
+    threadlocal var post_pass_calls_list: std.ArrayListUnmanaged(PostPassCall) = .empty;
+    threadlocal var render_target_counter: u32 = 1;
+    threadlocal var active_render_target: u32 = 0;
+    threadlocal var render_target_destroys: u32 = 0;
+
     pub fn initMock(allocator: std.mem.Allocator) void {
         allocator_ref = allocator;
         draw_calls_list = .empty;
@@ -197,10 +233,15 @@ pub const MockBackend = struct {
         material_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
+        render_target_calls_list = .empty;
+        post_pass_calls_list = .empty;
         texture_counter = 1;
         font_atlas_counter = 1;
         font_atlas_unload_calls = 0;
         in_camera_mode = false;
+        render_target_counter = 1;
+        active_render_target = 0;
+        render_target_destroys = 0;
     }
 
     pub fn deinitMock() void {
@@ -216,6 +257,8 @@ pub const MockBackend = struct {
             material_calls_list.deinit(alloc);
             camera_passes_list.deinit(alloc);
             viewport_calls_list.deinit(alloc);
+            render_target_calls_list.deinit(alloc);
+            post_pass_calls_list.deinit(alloc);
         }
         draw_calls_list = .empty;
         shape_calls_list = .empty;
@@ -228,6 +271,8 @@ pub const MockBackend = struct {
         material_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
+        render_target_calls_list = .empty;
+        post_pass_calls_list = .empty;
         allocator_ref = null;
     }
 
@@ -243,10 +288,15 @@ pub const MockBackend = struct {
         material_calls_list.clearRetainingCapacity();
         camera_passes_list.clearRetainingCapacity();
         viewport_calls_list.clearRetainingCapacity();
+        render_target_calls_list.clearRetainingCapacity();
+        post_pass_calls_list.clearRetainingCapacity();
         texture_counter = 1;
         font_atlas_counter = 1;
         font_atlas_unload_calls = 0;
         in_camera_mode = false;
+        render_target_counter = 1;
+        active_render_target = 0;
+        render_target_destroys = 0;
     }
 
     /// Camera passes recorded since the last reset — one per
@@ -338,6 +388,39 @@ pub const MockBackend = struct {
 
     pub fn getMaterialCallCount() usize {
         return material_calls_list.items.len;
+    }
+
+    /// Render targets created since the last reset — one per `createRenderTarget`.
+    /// The post-fx driver allocates exactly two (its ping-pong buffers) when a
+    /// stack is active; an EMPTY stack allocates NONE (the zero-cost path).
+    pub fn getRenderTargetCalls() []const RenderTargetCall {
+        return render_target_calls_list.items;
+    }
+
+    pub fn getRenderTargetCallCount() usize {
+        return render_target_calls_list.items.len;
+    }
+
+    /// `destroyRenderTarget` calls since the last reset — for target-lifecycle
+    /// (resize/deinit) assertions.
+    pub fn getRenderTargetDestroyCount() u32 {
+        return render_target_destroys;
+    }
+
+    /// The render target currently bound by `beginRenderTarget` (0 = backbuffer).
+    pub fn getActiveRenderTarget() u32 {
+        return active_render_target;
+    }
+
+    /// Post-fx pass applications since the last reset — one per `applyPostPass`
+    /// the mock actually executed. A test asserts the ordered (kind, src, dst)
+    /// sequence to verify the gfx driver's ping-pong + skip-unsupported logic.
+    pub fn getPostPassCalls() []const PostPassCall {
+        return post_pass_calls_list.items;
+    }
+
+    pub fn getPostPassCallCount() usize {
+        return post_pass_calls_list.items.len;
     }
 
     pub fn setScreenSize(width: i32, height: i32) void {
@@ -488,6 +571,64 @@ pub const MockBackend = struct {
         return switch (effect) {
             .flash, .palette_swap => true,
             .dissolve, .outline, .none => false,
+        };
+    }
+
+    // ── Render-target sub-surface (labelle-gfx#305) ─────────────────────────
+    // The mock implements ALL FIVE decls so `hasRenderTargetSubSurface` is true
+    // and the gfx post-fx driver has a target to ping-pong. Handles are distinct
+    // non-zero counters; `beginRenderTarget`/`endRenderTarget` track the active
+    // binding so a test can confirm the scene was redirected offscreen.
+
+    pub fn createRenderTarget(width: u16, height: u16) RenderTargetId {
+        const id = render_target_counter;
+        render_target_counter += 1;
+        if (allocator_ref) |alloc| {
+            render_target_calls_list.append(alloc, .{
+                .id = id,
+                .width = width,
+                .height = height,
+            }) catch {};
+        }
+        return id;
+    }
+
+    pub fn beginRenderTarget(id: RenderTargetId) void {
+        active_render_target = id;
+    }
+
+    pub fn endRenderTarget() void {
+        active_render_target = 0;
+    }
+
+    pub fn drawRenderTarget(_: RenderTargetId, _: Rectangle, _: Color) void {}
+
+    pub fn destroyRenderTarget(_: RenderTargetId) void {
+        render_target_destroys += 1;
+    }
+
+    // ── Post-fx pass primitive (labelle-gfx#305) ────────────────────────────
+
+    /// Records the pass kind + ping-pong (src, dst) so a test can assert the gfx
+    /// driver ordered + alternated them. Reached only for a supported pass (the
+    /// driver skips the rest via `postPassSupported`).
+    pub fn applyPostPass(pass: PostPass, src: RenderTargetId, dst: RenderTargetId) void {
+        if (allocator_ref) |alloc| {
+            post_pass_calls_list.append(alloc, .{
+                .kind = pass.kind,
+                .src = src,
+                .dst = dst,
+            }) catch {};
+        }
+    }
+
+    /// Fine-grained pass capability (labelle-gfx#305). The mock advertises
+    /// `bloom` + `vignette` and declines `color_grade` + `crt`, so the driver's
+    /// skip branch + warn-once are testable against a single backend.
+    pub fn postPassSupported(kind: PostPassKind) bool {
+        return switch (kind) {
+            .bloom, .vignette => true,
+            .color_grade, .crt => false,
         };
     }
 

@@ -119,6 +119,19 @@ pub const MaterialUniforms = backend_contract.MaterialUniforms;
 pub const Material = backend_contract.Material;
 pub const MaterialCapabilities = backend_contract.MaterialCapabilities;
 pub const materialCapabilities = backend_contract.materialCapabilities;
+// Render-target sub-surface + full-screen post-fx pass stack (labelle-gfx#305,
+// RFC §2). Value types + capability introspection; the optional
+// `createRenderTarget`/…/`applyPostPass`/`postPassSupported` decls live on
+// `Backend(Impl)`. The ping-pong stack DRIVER lives in labelle-gfx.
+pub const RenderTargetId = backend_contract.RenderTargetId;
+pub const render_target_fn_decls = backend_contract.render_target_fn_decls;
+pub const hasRenderTargetSubSurface = backend_contract.hasRenderTargetSubSurface;
+pub const missingRenderTargetDecls = backend_contract.missingRenderTargetDecls;
+pub const PostPassKind = backend_contract.PostPassKind;
+pub const PostPassUniforms = backend_contract.PostPassUniforms;
+pub const PostPass = backend_contract.PostPass;
+pub const PostFxCapabilities = backend_contract.PostFxCapabilities;
+pub const postFxCapabilities = backend_contract.postFxCapabilities;
 // Render-contract versions: the two named sub-surfaces + the composite.
 pub const DRAW_CONTRACT_VERSION = backend_contract.DRAW_CONTRACT_VERSION;
 pub const LOADER_CONTRACT_VERSION = backend_contract.LOADER_CONTRACT_VERSION;

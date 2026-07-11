@@ -320,6 +320,19 @@ pub fn runRenderSuite(comptime Impl: type) !void {
             const indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
             B.drawMesh(tex, &positions, &uvs, &colors, &indices, .normal);
         }
+
+        // Optional material-aware sprite draw (labelle-gfx#305, capability-
+        // gated). The `Backend(Impl)` wrapper is total: a `.none` material and
+        // any effect the backend doesn't advertise both degrade to a plain
+        // `drawTexturePro`, so calling it is safe for EVERY backend — the guard
+        // here just documents that materials ride the same draw surface.
+        {
+            B.drawTextureProMaterial(tex, rect, rect, v, 0, B.white, .{}); // .none → degrade path
+            B.drawTextureProMaterial(tex, rect, rect, v, 0, B.white, .{
+                .effect = .flash,
+                .uniforms = .{ .r = 1, .g = 1, .b = 1, .a = 1, .scalar0 = 0.5 },
+            });
+        }
     }
 
     // ── Compressed-texture capability (SHAPE-ONLY, capability-gated) ──
@@ -348,6 +361,10 @@ fn runRenderValueTypeChecks() !void {
         backend_contract.CodepointRange,
         backend_contract.CodepointEntry,
         backend_contract.KernPair,
+        // Material seam value types (labelle-gfx#305) — flat `extern struct`s
+        // (RFC §9 Q5), reinterpreted by the marshal boundary like the font types.
+        backend_contract.Material,
+        backend_contract.MaterialUniforms,
     }) |T| {
         try testing.expectEqual(std.builtin.Type.ContainerLayout.@"extern", @typeInfo(T).@"struct".layout);
     }
@@ -368,6 +385,21 @@ fn runRenderValueTypeChecks() !void {
 
     const kp = backend_contract.KernPair{ .first = 1, .second = 2, .advance = -1.5 };
     try testing.expectEqual(@as(f32, -1.5), kp.advance);
+
+    // Material seam defaults + field round-trip (labelle-gfx#305). Default is
+    // the `.none` fast path with a zeroed uniform block; a constructed material
+    // reads back its effect + uniforms.
+    const default_material = backend_contract.Material{};
+    try testing.expectEqual(backend_contract.MaterialEffect.none, default_material.effect);
+    try testing.expectEqual(@as(f32, 0), default_material.uniforms.scalar0);
+    try testing.expectEqual(@as(u32, 0), default_material.uniforms.aux_texture);
+    const flash = backend_contract.Material{
+        .effect = .flash,
+        .uniforms = .{ .r = 1, .g = 1, .b = 1, .a = 1, .scalar0 = 0.5 },
+    };
+    try testing.expectEqual(backend_contract.MaterialEffect.flash, flash.effect);
+    try testing.expectEqual(@as(f32, 0.5), flash.uniforms.scalar0);
+    try testing.expectEqual(@as(f32, 1), flash.uniforms.r);
 
     // FontBakeParams defaults (ASCII printable, 16px, 512x512) — the loader
     // relies on these when a caller omits params.

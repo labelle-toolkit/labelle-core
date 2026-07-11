@@ -131,6 +131,22 @@ pub const MockBackend = struct {
         blend: BlendMode,
     };
 
+    /// Material value types for the per-draw curated-effect seam
+    /// (labelle-gfx#305), re-exported so tests can assert recorded values.
+    pub const Material = backend_mod.Material;
+    pub const MaterialEffect = backend_mod.MaterialEffect;
+    pub const MaterialUniforms = backend_mod.MaterialUniforms;
+
+    /// One `drawTextureProMaterial` call. Records the texture, destination,
+    /// tint, and the full `Material` (effect + uniforms) so a test can assert
+    /// the renderer forwarded the exact effect + uniform block.
+    pub const MaterialCall = struct {
+        texture_id: u32,
+        dest: Rectangle,
+        tint: Color,
+        material: Material,
+    };
+
     threadlocal var draw_calls_list: std.ArrayListUnmanaged(DrawCall) = .empty;
     threadlocal var shape_calls_list: std.ArrayListUnmanaged(ShapeCall) = .empty;
     threadlocal var circle_calls_list: std.ArrayListUnmanaged(CircleCall) = .empty;
@@ -139,6 +155,7 @@ pub const MockBackend = struct {
     threadlocal var polygon_calls_list: std.ArrayListUnmanaged(PolygonCall) = .empty;
     threadlocal var text_calls_list: std.ArrayListUnmanaged(TextCall) = .empty;
     threadlocal var mesh_calls_list: std.ArrayListUnmanaged(MeshCall) = .empty;
+    threadlocal var material_calls_list: std.ArrayListUnmanaged(MaterialCall) = .empty;
     threadlocal var allocator_ref: ?std.mem.Allocator = null;
     threadlocal var screen_width_val: i32 = 800;
     threadlocal var screen_height_val: i32 = 600;
@@ -177,6 +194,7 @@ pub const MockBackend = struct {
         polygon_calls_list = .empty;
         text_calls_list = .empty;
         mesh_calls_list = .empty;
+        material_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
         texture_counter = 1;
@@ -195,6 +213,7 @@ pub const MockBackend = struct {
             polygon_calls_list.deinit(alloc);
             text_calls_list.deinit(alloc);
             mesh_calls_list.deinit(alloc);
+            material_calls_list.deinit(alloc);
             camera_passes_list.deinit(alloc);
             viewport_calls_list.deinit(alloc);
         }
@@ -206,6 +225,7 @@ pub const MockBackend = struct {
         polygon_calls_list = .empty;
         text_calls_list = .empty;
         mesh_calls_list = .empty;
+        material_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
         allocator_ref = null;
@@ -220,6 +240,7 @@ pub const MockBackend = struct {
         polygon_calls_list.clearRetainingCapacity();
         text_calls_list.clearRetainingCapacity();
         mesh_calls_list.clearRetainingCapacity();
+        material_calls_list.clearRetainingCapacity();
         camera_passes_list.clearRetainingCapacity();
         viewport_calls_list.clearRetainingCapacity();
         texture_counter = 1;
@@ -306,6 +327,17 @@ pub const MockBackend = struct {
 
     pub fn getMeshCallCount() usize {
         return mesh_calls_list.items.len;
+    }
+
+    /// Material-aware draw calls recorded since the last reset — one per
+    /// `drawTextureProMaterial` the mock actually executed (degraded/`.none`
+    /// draws take `drawTexturePro` and land in `getDrawCalls` instead).
+    pub fn getMaterialCalls() []const MaterialCall {
+        return material_calls_list.items;
+    }
+
+    pub fn getMaterialCallCount() usize {
+        return material_calls_list.items.len;
     }
 
     pub fn setScreenSize(width: i32, height: i32) void {
@@ -421,6 +453,42 @@ pub const MockBackend = struct {
                 .blend = blend,
             }) catch {};
         }
+    }
+
+    /// Optional material-aware draw (labelle-gfx#305). The mock opts into the
+    /// material seam by declaring this decl; it records the texture, dest, tint
+    /// and the full `Material` so a test can assert the renderer forwarded the
+    /// exact effect + uniforms. Reached only for a supported, non-`.none`
+    /// effect (the `Backend(Impl)` wrapper degrades the rest to
+    /// `drawTexturePro`).
+    pub fn drawTextureProMaterial(
+        texture: Texture,
+        _: Rectangle,
+        dest: Rectangle,
+        _: Vector2,
+        _: f32,
+        tint: Color,
+        material: Material,
+    ) void {
+        if (allocator_ref) |alloc| {
+            material_calls_list.append(alloc, .{
+                .texture_id = texture.id,
+                .dest = dest,
+                .tint = tint,
+                .material = material,
+            }) catch {};
+        }
+    }
+
+    /// Fine-grained effect capability (labelle-gfx#305). The mock advertises
+    /// `flash` + `palette_swap` and declines `dissolve` + `outline`, so the
+    /// renderer's degrade branch + warn-once are testable against a single
+    /// backend. `none` is never a material effect.
+    pub fn materialSupported(effect: MaterialEffect) bool {
+        return switch (effect) {
+            .flash, .palette_swap => true,
+            .dissolve, .outline, .none => false,
+        };
     }
 
     pub fn loadTexture(_: [:0]const u8) !Texture {

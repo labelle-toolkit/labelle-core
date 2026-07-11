@@ -152,6 +152,100 @@ pub const DecodedFont = struct {
 /// a quality degradation, not a contract violation.
 pub const BlendMode = enum { normal, additive, multiply, screen };
 
+// ── Material seam (per-draw curated shader effects, labelle-gfx#305) ─────────
+// Purely additive value types + an OPTIONAL `@hasDecl`-gated draw decl (see
+// `Backend(Impl).drawTextureProMaterial`). Declaring them changes no existing
+// `extern` layout and adds no REQUIRED decl, so — exactly like `drawMesh` /
+// `FontAtlas` / `uploadCompressed` — none of the `*_CONTRACT_VERSION` numbers
+// bump (the file's rule: optional additions are non-breaking).
+
+/// Curated built-in per-draw shader effect (material seam, labelle-gfx#305).
+/// The contract NAMES the effect; each backend owns its shader dialect + impl.
+/// v1 is a FIXED set — NOT arbitrary user shaders (the 5-backend × N-dialect
+/// matrix is unsupportable). A backend implements as many as it can; the rest
+/// degrade (draw the sprite with no material). `none` is the batch-friendly
+/// default and never touches the material path.
+pub const MaterialEffect = enum(u8) {
+    none = 0,
+    palette_swap,
+    flash,
+    dissolve,
+    outline,
+};
+
+/// Per-effect uniform block — a FLAT `extern struct` (decided: NOT an
+/// `extern union`, see RFC §9 Q5). Rationale: the marshal seam (the assembler-
+/// generated backend adapter) reinterprets contract value types by locked
+/// `extern struct` layout + `@ptrCast`, and EVERY existing contract type
+/// (`Glyph`, `CodepointRange`, `CodepointEntry`, `KernPair`) is an `extern
+/// struct` — there is ZERO `extern union` anywhere in the toolkit. A flat
+/// struct is the proven, reinterpret-safe shape; the backend switches on
+/// `Material.effect` and reads the fields that effect uses (unused = 0). The
+/// named-superset layout below covers all four effects in ≤ 24 bytes.
+pub const MaterialUniforms = extern struct {
+    /// Effect color, linear 0..1. `flash`/`outline`: the effect color;
+    /// `dissolve`: the burn-edge glow (`r,g,b` used, `a` ignored);
+    /// `palette_swap`: unused.
+    r: f32 = 0,
+    g: f32 = 0,
+    b: f32 = 0,
+    a: f32 = 0,
+    /// Primary scalar. `flash`: amount (0=sprite … 1=fully flashed) ·
+    /// `dissolve`: threshold (0=solid … 1=gone) · `outline`: thickness (px) ·
+    /// `palette_swap`: unused.
+    scalar0: f32 = 0,
+    /// Secondary scalar. `dissolve`: edge_width (px) · `outline`: softness
+    /// (0=hard … 1=feathered) · others: unused.
+    scalar1: f32 = 0,
+    /// Aux backend-texture handle. `palette_swap`: the LUT ramp (0 = none →
+    /// degrade) · `dissolve`: noise texture (0 = backend built-in) · others:
+    /// unused. Plain `u32` handle — same shape as `drawMesh` taking a texture
+    /// (RFC §9 Q4, decided).
+    aux_texture: u32 = 0,
+    /// `palette_swap`: active ramp entry count (≤ LUT width). Others: unused.
+    aux_count: u32 = 0,
+};
+
+/// A per-draw material: a curated effect + its uniform block. Rides a sprite
+/// draw. `effect == .none` is the fast path — the renderer never calls the
+/// material draw for it. Small + copyable; lives inline on `SpriteVisual`.
+///
+/// GPU counterpart to the CPU-side `effects.TintPulse` (gfx): for a zero-cost,
+/// every-backend tint swap use `effects.TintPulse`; for a shader-based flash
+/// with soft edges / partial `amount` mix use `MaterialEffect.flash` here
+/// (RFC §5).
+pub const Material = extern struct {
+    effect: MaterialEffect = .none,
+    uniforms: MaterialUniforms = .{},
+};
+
+/// The curated material effects a backend `Impl` advertises (see
+/// `materialCapabilities`). Consumed by (a) the provider manifest
+/// `.capabilities` mirror (pluggable-backends), so an unsupported effect a game
+/// *declares* surfaces as an early project-level note rather than a silent
+/// per-frame drop, and (b) the renderer's warn-once table.
+pub const MaterialCapabilities = struct { effects: []const MaterialEffect };
+
+/// Which curated material effects `Impl` advertises. Empty when the backend has
+/// no `drawTextureProMaterial` at all. When it declares the draw decl but no
+/// fine-grained `materialSupported`, it is taken to support every built-in
+/// effect (all of `MaterialEffect` except `none`). Comptime introspection —
+/// analogous to `missingBackendDecls`, but for an OPTIONAL capability rather
+/// than a required one, so it feeds negotiation/warn-once, NOT `assertBackend`
+/// (a missing material is never a contract violation).
+pub fn materialCapabilities(comptime Impl: type) MaterialCapabilities {
+    comptime {
+        if (!@hasDecl(Impl, "drawTextureProMaterial")) return .{ .effects = &.{} };
+        var effects: []const MaterialEffect = &.{};
+        for (std.enums.values(MaterialEffect)) |eff| {
+            if (eff == .none) continue;
+            if (@hasDecl(Impl, "materialSupported") and !Impl.materialSupported(eff)) continue;
+            effects = effects ++ [_]MaterialEffect{eff};
+        }
+        return .{ .effects = effects };
+    }
+}
+
 // ── Contract versions ───────────────────────────────────────────────────────
 //
 // Per-sub-surface contract-version integers (labelle-assembler#453, RFC
@@ -542,6 +636,63 @@ pub fn Backend(comptime Impl: type) type {
             if (@hasDecl(Impl, "drawMesh")) {
                 Impl.drawMesh(texture, positions, uvs, colors, indices, blend);
             }
+        }
+
+        /// Material-aware sprite draw (material seam, labelle-gfx#305).
+        /// Identical to `drawTexturePro` but carries a curated `Material`.
+        ///
+        /// OPTIONAL, mirroring `drawMesh`: a backend opts in by declaring `pub
+        /// fn drawTextureProMaterial(...)`. Adding it is non-breaking, so
+        /// `DRAW_CONTRACT_VERSION` does NOT bump.
+        ///
+        /// Two-level capability gating (the mechanism the seam hangs on):
+        ///   1. Decl-level (`@hasDecl(Impl, "drawTextureProMaterial")`): does
+        ///      the backend do materials at all? Absent → every material
+        ///      degrades to a plain `drawTexturePro` (the sprite renders WITHOUT
+        ///      the effect — a quality degradation, NOT a contract violation).
+        ///      Same coarse gate as `drawMesh`.
+        ///   2. Effect-level (optional `Impl.materialSupported(effect) bool`):
+        ///      does the backend do THIS effect? Lets a backend ship `flash` +
+        ///      `palette_swap` but not `dissolve` yet without an all-or-nothing
+        ///      decl. Absent ⇒ "if I declared the draw decl, I do all built-ins."
+        ///      An unsupported effect falls back to a plain `drawTexturePro`.
+        ///
+        /// `effect == .none` also falls through to the plain path — callers are
+        /// expected to skip this wrapper for `.none` (the renderer branches on
+        /// it), but the guard keeps the wrapper correct if they don't.
+        pub inline fn drawTextureProMaterial(
+            texture: Texture,
+            source: Rectangle,
+            dest: Rectangle,
+            origin: Vector2,
+            rotation: f32,
+            tint: Color,
+            material: Material,
+        ) void {
+            if (@hasDecl(Impl, "drawTextureProMaterial") and material.effect != .none) {
+                // Fine-grained: the backend may implement the decl but not THIS effect.
+                if (@hasDecl(Impl, "materialSupported")) {
+                    if (!Impl.materialSupported(material.effect)) {
+                        drawTexturePro(texture, source, dest, origin, rotation, tint);
+                        return;
+                    }
+                }
+                Impl.drawTextureProMaterial(texture, source, dest, origin, rotation, tint, material);
+            } else {
+                drawTexturePro(texture, source, dest, origin, rotation, tint);
+            }
+        }
+
+        /// True if `Impl` advertises the curated material `effect`. Coarse gate
+        /// first (no `drawTextureProMaterial` ⇒ false for everything), then the
+        /// optional fine-grained `materialSupported` (absent ⇒ all built-ins).
+        /// Runtime-callable mirror of the comptime `materialCapabilities`, for
+        /// the renderer's per-effect degrade branch + warn-once table.
+        pub inline fn materialSupported(effect: MaterialEffect) bool {
+            if (!@hasDecl(Impl, "drawTextureProMaterial")) return false;
+            if (effect == .none) return false;
+            if (@hasDecl(Impl, "materialSupported")) return Impl.materialSupported(effect);
+            return true;
         }
 
         pub inline fn drawRectangleLinesEx(rec: Rectangle, line_thick: f32, tint: Color) void {

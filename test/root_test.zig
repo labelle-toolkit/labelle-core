@@ -2265,6 +2265,151 @@ test "Backend: drawMesh is a no-op (non-breaking) on a backend lacking it" {
     B.drawMesh(tex, &positions, &uvs, &colors, &indices, .multiply);
 }
 
+test "Backend: drawTextureProMaterial forwards a supported effect to the mock backend" {
+    // labelle-gfx#305: the per-draw material seam. The mock opts in by declaring
+    // `drawTextureProMaterial` + `materialSupported`; a supported effect
+    // (`flash`) forwards the exact effect + uniforms and records a MaterialCall.
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    const tex = try B.loadTexture("atlas.png");
+    const rect = MockBackend.Rectangle{ .x = 1, .y = 2, .width = 3, .height = 4 };
+    const origin = MockBackend.Vector2{ .x = 0, .y = 0 };
+    const material = root.Material{
+        .effect = .flash,
+        .uniforms = .{ .r = 1, .g = 0.5, .b = 0.25, .a = 1, .scalar0 = 0.75 },
+    };
+    B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, material);
+
+    // Went through the material path, not the plain drawTexturePro path.
+    try testing.expectEqual(@as(usize, 1), MockBackend.getMaterialCallCount());
+    try testing.expectEqual(@as(usize, 0), MockBackend.getDrawCallCount());
+    const calls = MockBackend.getMaterialCalls();
+    try testing.expectEqual(tex.id, calls[0].texture_id);
+    try testing.expectEqual(root.MaterialEffect.flash, calls[0].material.effect);
+    try testing.expectEqual(@as(f32, 0.75), calls[0].material.uniforms.scalar0);
+    try testing.expectEqual(@as(f32, 0.5), calls[0].material.uniforms.g);
+}
+
+test "Backend: drawTextureProMaterial degrades an unsupported effect to a plain sprite" {
+    // The mock declines `outline`, so `materialSupported(.outline) == false` and
+    // the wrapper falls back to `drawTexturePro` — the sprite still draws (no
+    // MaterialCall), a quality degradation, not a contract violation.
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    try testing.expect(!B.materialSupported(.outline));
+    try testing.expect(B.materialSupported(.flash));
+    try testing.expect(B.materialSupported(.palette_swap));
+    try testing.expect(!B.materialSupported(.none)); // never a material effect
+
+    const tex = try B.loadTexture("atlas.png");
+    const rect = MockBackend.Rectangle{ .x = 0, .y = 0, .width = 8, .height = 8 };
+    const origin = MockBackend.Vector2{ .x = 0, .y = 0 };
+    B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{ .effect = .outline });
+
+    try testing.expectEqual(@as(usize, 0), MockBackend.getMaterialCallCount());
+    try testing.expectEqual(@as(usize, 1), MockBackend.getDrawCallCount());
+}
+
+test "Backend: a `.none` material always takes the plain draw path" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    const tex = try B.loadTexture("atlas.png");
+    const rect = MockBackend.Rectangle{ .x = 0, .y = 0, .width = 8, .height = 8 };
+    const origin = MockBackend.Vector2{ .x = 0, .y = 0 };
+    B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{}); // .none default
+
+    try testing.expectEqual(@as(usize, 0), MockBackend.getMaterialCallCount());
+    try testing.expectEqual(@as(usize, 1), MockBackend.getDrawCallCount());
+}
+
+test "materialCapabilities: reports the mock's advertised effects; empty for a materialless backend" {
+    // The mock advertises exactly flash + palette_swap (order = MaterialEffect
+    // enum order, minus `none`).
+    const caps = comptime root.materialCapabilities(MockBackend);
+    try testing.expectEqual(@as(usize, 2), caps.effects.len);
+    try testing.expectEqual(root.MaterialEffect.palette_swap, caps.effects[0]);
+    try testing.expectEqual(root.MaterialEffect.flash, caps.effects[1]);
+
+    // A backend without `drawTextureProMaterial` advertises nothing, and the
+    // wrapper compiles to a pure `drawTexturePro` degrade (zero cost).
+    const NoMaterial = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1 };
+        const C = @This().Color;
+
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+        var draws: usize = 0;
+
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {
+            draws += 1;
+        }
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 1, .height = 1 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{ .id = 2 };
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+    };
+
+    // No material decl → still a valid backend (optional), empty capabilities,
+    // and `materialSupported` is false for every effect.
+    try testing.expect(!@hasDecl(NoMaterial, "drawTextureProMaterial"));
+    try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(NoMaterial).len);
+    const empty = comptime root.materialCapabilities(NoMaterial);
+    try testing.expectEqual(@as(usize, 0), empty.effects.len);
+
+    const B = Backend(NoMaterial);
+    try testing.expect(!B.materialSupported(.flash));
+    const tex = try B.loadTexture("x.png");
+    const rect = NoMaterial.Rectangle{ .x = 0, .y = 0, .width = 1, .height = 1 };
+    const origin = NoMaterial.Vector2{ .x = 0, .y = 0 };
+    // Every material degrades to a plain draw; compiles + runs at zero cost.
+    B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{ .effect = .flash });
+    try testing.expectEqual(@as(usize, 1), NoMaterial.draws);
+}
+
 // ---------------------------------------------------------------------------
 // Behavioral conformance suites (labelle-assembler#453).
 //

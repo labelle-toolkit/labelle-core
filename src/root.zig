@@ -111,6 +111,14 @@ pub const loader_fn_decls = backend_contract.loader_fn_decls;
 pub const required_fn_decls = backend_contract.required_fn_decls;
 // Blend mode for the optional `drawMesh` textured-mesh primitive (labelle-gfx#290).
 pub const BlendMode = backend_contract.BlendMode;
+// Per-draw curated material seam (labelle-gfx#305) — value types + the comptime
+// capability introspection helper. The optional `drawTextureProMaterial` /
+// `materialSupported` decls live on `Backend(Impl)`.
+pub const MaterialEffect = backend_contract.MaterialEffect;
+pub const MaterialUniforms = backend_contract.MaterialUniforms;
+pub const Material = backend_contract.Material;
+pub const MaterialCapabilities = backend_contract.MaterialCapabilities;
+pub const materialCapabilities = backend_contract.materialCapabilities;
 // Render-contract versions: the two named sub-surfaces + the composite.
 pub const DRAW_CONTRACT_VERSION = backend_contract.DRAW_CONTRACT_VERSION;
 pub const LOADER_CONTRACT_VERSION = backend_contract.LOADER_CONTRACT_VERSION;

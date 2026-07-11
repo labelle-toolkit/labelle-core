@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const root = @import("labelle-core");
 
+const backend_contract = root.backend_contract;
 const HookDispatcher = root.HookDispatcher;
 const MergeHooks = root.MergeHooks;
 const Ecs = root.Ecs;
@@ -2408,6 +2409,144 @@ test "materialCapabilities: reports the mock's advertised effects; empty for a m
     // Every material degrades to a plain draw; compiles + runs at zero cost.
     B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{ .effect = .flash });
     try testing.expectEqual(@as(usize, 1), NoMaterial.draws);
+}
+
+// ── Render-target sub-surface + post-fx seam (labelle-gfx#305, RFC §2) ───────
+
+/// A backend satisfying ONLY the required render contract — no material, no
+/// render-target sub-surface, no post-fx. Proves the optional seams degrade to
+/// zero-cost no-ops on a backend that opts into none of them.
+const MinimalBackend = struct {
+    pub const Texture = struct { id: u32 };
+    pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+    pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+    pub const Vector2 = struct { x: f32, y: f32 };
+    pub const Camera2D = struct { zoom: f32 = 1 };
+    const C = @This().Color;
+
+    pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+    pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+    pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+    pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+    pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+    pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+    pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+    pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+    pub fn drawPolygon(_: []const Vector2, _: C) void {}
+    pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+    pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+    pub fn loadTexture(_: [:0]const u8) !Texture {
+        return .{ .id = 1 };
+    }
+    pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+        const pixels = try allocator.alloc(u8, 4);
+        @memset(pixels, 0);
+        return .{ .pixels = pixels, .width = 1, .height = 1 };
+    }
+    pub fn uploadTexture(_: root.DecodedImage) !Texture {
+        return .{ .id = 2 };
+    }
+    pub fn unloadTexture(_: Texture) void {}
+    pub fn beginMode2D(_: Camera2D) void {}
+    pub fn endMode2D() void {}
+    pub fn getScreenWidth() i32 {
+        return 640;
+    }
+    pub fn getScreenHeight() i32 {
+        return 480;
+    }
+    pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+        return pos;
+    }
+    pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+        return pos;
+    }
+    pub fn setDesignSize(_: i32, _: i32) void {}
+};
+
+test "render-target sub-surface: mock implements all five; a materialless backend implements none" {
+    // The mock declares the whole sub-surface → `hasRenderTargetSubSurface`
+    // true and the post-fx driver has a target to ping-pong on.
+    try testing.expect(comptime backend_contract.hasRenderTargetSubSurface(MockBackend));
+    // Both "all five" and "none" are CONSISTENT → no optional-consistency error.
+    try testing.expectEqual(@as(usize, 0), comptime backend_contract.missingRenderTargetDecls(MockBackend).len);
+
+    // A backend with none of the five is also consistent (it simply has no
+    // post-fx — a fully-absent sub-surface is not a violation).
+    const NoTargets = MinimalBackend;
+    try testing.expect(!comptime backend_contract.hasRenderTargetSubSurface(NoTargets));
+    try testing.expectEqual(@as(usize, 0), comptime backend_contract.missingRenderTargetDecls(NoTargets).len);
+    // Still a valid backend — the sub-surface is optional, out of `assertBackend`.
+    try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(NoTargets).len);
+}
+
+test "render-target sub-surface: a PARTIAL implementation is an optional-consistency error" {
+    // A backend that declares some-but-not-all five can't composite — surface it
+    // as an optional-consistency error (the "all five or none" rule), tagged
+    // `.render_target`, WITHOUT failing `assertBackend`.
+    // `missingRenderTargetDecls`/`missingBackendDecls` both classify purely by
+    // `@hasDecl`, so the fixture only needs the two RT decls it declares.
+    const PartialTargets = struct {
+        // Declares create + begin but NOT end/draw/destroy.
+        pub fn createRenderTarget(_: u16, _: u16) u32 {
+            return 1;
+        }
+        pub fn beginRenderTarget(_: u32) void {}
+    };
+    const missing = comptime backend_contract.missingRenderTargetDecls(PartialTargets);
+    try testing.expectEqual(@as(usize, 3), missing.len);
+    for (missing) |m| try testing.expectEqual(backend_contract.RenderSubSurface.render_target, m.sub_surface);
+    try testing.expect(!comptime backend_contract.hasRenderTargetSubSurface(PartialTargets));
+}
+
+test "Backend.applyPostPass forwards a supported pass and skips an unsupported one" {
+    // labelle-gfx#305: the post-fx pass primitive. The mock advertises
+    // bloom + vignette and declines color_grade + crt.
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    try testing.expect(B.postPassSupported(.bloom));
+    try testing.expect(B.postPassSupported(.vignette));
+    try testing.expect(!B.postPassSupported(.color_grade));
+    try testing.expect(!B.postPassSupported(.crt));
+
+    const t_a = B.createRenderTarget(320, 240);
+    const t_b = B.createRenderTarget(320, 240);
+    try testing.expect(t_a != 0 and t_b != 0 and t_a != t_b);
+
+    // A supported pass records; an unsupported pass is a silent no-op at the
+    // wrapper level (the gfx DRIVER is what warn-once's + skips-without-advance).
+    B.applyPostPass(.{ .kind = .bloom, .uniforms = .{ .scalar0 = 0.8 } }, t_a, t_b);
+    B.applyPostPass(.{ .kind = .crt }, t_b, t_a); // unsupported → no-op
+    try testing.expectEqual(@as(usize, 1), MockBackend.getPostPassCallCount());
+    const calls = MockBackend.getPostPassCalls();
+    try testing.expectEqual(backend_contract.PostPassKind.bloom, calls[0].kind);
+    try testing.expectEqual(t_a, calls[0].src);
+    try testing.expectEqual(t_b, calls[0].dst);
+}
+
+test "postFxCapabilities: reports the mock's advertised passes; empty for a post-fx-less backend" {
+    const caps = comptime backend_contract.postFxCapabilities(MockBackend);
+    try testing.expectEqual(@as(usize, 2), caps.passes.len);
+    try testing.expectEqual(backend_contract.PostPassKind.bloom, caps.passes[0]);
+    try testing.expectEqual(backend_contract.PostPassKind.vignette, caps.passes[1]);
+
+    // A backend without `applyPostPass` advertises nothing and `postPassSupported`
+    // is false for every kind — the whole stack degrades at zero cost.
+    const empty = comptime backend_contract.postFxCapabilities(MinimalBackend);
+    try testing.expectEqual(@as(usize, 0), empty.passes.len);
+    const B = Backend(MinimalBackend);
+    try testing.expect(!B.postPassSupported(.bloom));
+    try testing.expect(!B.hasRenderTargets());
+    // The render-target wrappers compile + no-op on a backend without them.
+    try testing.expectEqual(@as(u32, 0), B.createRenderTarget(1, 1));
+    B.beginRenderTarget(0);
+    B.applyPostPass(.{ .kind = .bloom }, 0, 0); // compiles, no-op
+    B.endRenderTarget();
 }
 
 // ---------------------------------------------------------------------------

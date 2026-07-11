@@ -333,6 +333,40 @@ pub fn runRenderSuite(comptime Impl: type) !void {
                 .uniforms = .{ .r = 1, .g = 1, .b = 1, .a = 1, .scalar0 = 0.5 },
             });
         }
+
+        // Optional render-target sub-surface + post-fx pass primitive
+        // (labelle-gfx#305, capability-gated). A backend advertising the WHOLE
+        // render-target sub-surface must round-trip a create→begin→end→draw→
+        // destroy cycle without crashing (SHAPE-ONLY — no pixel assertions
+        // host-side), and `applyPostPass` must link for every advertised pass
+        // kind. The "all five or none" consistency is a comptime invariant.
+        {
+            const rt_missing = comptime backend_contract.missingRenderTargetDecls(Impl);
+            try testing.expectEqual(@as(usize, 0), rt_missing.len); // never a PARTIAL sub-surface
+
+            if (comptime backend_contract.hasRenderTargetSubSurface(Impl)) {
+                const id = B.createRenderTarget(64, 64);
+                try testing.expect(id != 0); // 0 is the reserved INVALID handle
+                const id2 = B.createRenderTarget(64, 64);
+                B.beginRenderTarget(id);
+                B.endRenderTarget();
+                // `applyPostPass` links for each advertised pass; unsupported
+                // kinds no-op through the wrapper's fine-grained gate.
+                for (comptime backend_contract.postFxCapabilities(Impl).passes) |kind| {
+                    try testing.expect(B.postPassSupported(kind));
+                    B.applyPostPass(.{ .kind = kind }, id, id2);
+                }
+                B.drawRenderTarget(id2, rect, B.white);
+                B.destroyRenderTarget(id);
+                B.destroyRenderTarget(id2);
+            } else {
+                // No sub-surface → the whole seam degrades: `hasRenderTargets`
+                // false, `postPassSupported` false for every kind, the wrappers
+                // are no-ops. Safe to call on ANY backend.
+                try testing.expect(!B.hasRenderTargets());
+                try testing.expect(!B.postPassSupported(.bloom));
+            }
+        }
     }
 
     // ── Compressed-texture capability (SHAPE-ONLY, capability-gated) ──
@@ -365,6 +399,10 @@ fn runRenderValueTypeChecks() !void {
         // (RFC §9 Q5), reinterpreted by the marshal boundary like the font types.
         backend_contract.Material,
         backend_contract.MaterialUniforms,
+        // Post-fx seam value types (labelle-gfx#305) — flat `extern struct`s
+        // (RFC §2.2 / §9 Q5), reinterpreted by the marshal boundary likewise.
+        backend_contract.PostPass,
+        backend_contract.PostPassUniforms,
     }) |T| {
         try testing.expectEqual(std.builtin.Type.ContainerLayout.@"extern", @typeInfo(T).@"struct".layout);
     }

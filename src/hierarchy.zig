@@ -30,22 +30,21 @@ pub fn ParentComponent(comptime Entity: type) type {
 /// silently loses children (the old `MAX_CHILDREN = 16` buffer dropped
 /// overflow, orphaning entities from teardown — #657).
 ///
-/// **Heap ownership contract.** The list owns a heap allocation, so the owner
-/// MUST call `deinit` before the component is dropped. This is *by design* not
-/// automatic: the ECS backends (the shipped one and this crate's
-/// `MockEcsBackend`) store components by value and run no destructors on
-/// `removeComponent` / `destroyEntity` / backend teardown. The engine — the
-/// sole hierarchy manager — calls `deinit` at every choke point where a
-/// `ChildrenComponent` is dropped: entity-destroy, component-remove, ECS-reset,
-/// and the load-rebuild teardown.
+/// **Heap ownership contract.** The list owns a heap allocation that must be
+/// `deinit`'d before the component is dropped. Two owners, by backend:
 ///
-/// Consequence for direct-backend use: code that stores a `ChildrenComponent`
-/// in a raw backend WITHOUT the engine (e.g. a core unit test on
-/// `MockEcsBackend`) must `deinit` it itself before dropping the entity /
-/// component / backend, or the child list leaks. (Making a backend auto-run
-/// component destructors is a separate, larger ECS-lifecycle change — a
-/// generic `@hasDecl(T, "deinit")` sweep across all backends — deliberately
-/// out of scope here.)
+///   * The **shipped** ECS backend stores components by value and runs no
+///     destructors, so the **engine** — the sole hierarchy manager — calls
+///     `deinit` at every choke point a `ChildrenComponent` is dropped:
+///     entity-destroy, component-remove, ECS-reset, and load-rebuild teardown.
+///   * This crate's **`MockEcsBackend`** (used by core's own unit tests, where
+///     no engine is present) runs a heap-owning component's `deinit` itself —
+///     on `removeComponent`, on `addComponent` overwrite of a recycled id, and
+///     for every surviving component at backend teardown — so tests that store
+///     a `ChildrenComponent` through it don't leak.
+///
+/// Either way the `deinit` convention is `pub fn deinit(self, allocator)`, and
+/// the allocator MUST be the one `addChild` used.
 ///
 /// `ArrayListUnmanaged` (not managed) is deliberate: it holds no allocator
 /// pointer, so the ECS can bit-copy the component during pool relocation (a

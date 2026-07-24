@@ -865,6 +865,38 @@ test "ParentComponent is saveable with entity ref" {
     try testing.expectEqualStrings("entity", refs[0]);
 }
 
+test "MockEcsBackend frees heap-owning ChildrenComponent (no leak)" {
+    // codex #65: storing a ChildrenComponent through the ECS allocates in
+    // `addChild`; the mock must free that backing list on remove / overwrite /
+    // teardown, or `testing.allocator` flags the leak here.
+    const Children = ChildrenComponent(u32);
+    var backend = MockEcsBackend(u32).init(testing.allocator);
+    defer backend.deinit(); // teardown must free the surviving child list
+
+    const e = Ecs(MockEcsBackend(u32)){ .backend = &backend };
+
+    // Stored-and-survives: freed by backend teardown.
+    const parent = e.createEntity();
+    var kids = Children{};
+    var i: u32 = 0;
+    while (i < 30) : (i += 1) kids.addChild(testing.allocator, i);
+    e.add(parent, kids); // moves the ArrayList into storage (don't deinit `kids`)
+    try testing.expectEqual(@as(usize, 30), e.get(parent, Children).?.count());
+
+    // Explicit remove must free too (not just teardown).
+    const p2 = e.createEntity();
+    var kids2 = Children{};
+    kids2.addChild(testing.allocator, 7);
+    e.add(p2, kids2);
+    e.remove(p2, Children);
+
+    // Overwrite of the same (entity, T) must free the prior list.
+    var kids3 = Children{};
+    kids3.addChild(testing.allocator, 1);
+    e.add(parent, kids3); // overwrites the 30-child list → prior must be freed
+    try testing.expectEqual(@as(usize, 1), e.get(parent, Children).?.count());
+}
+
 test "ChildrenComponent stays transient (rebuilt from Parent on load)" {
     // The engine derives Children from Parent, so persisting it would
     // double-source the relationship. Keep it unsaved — Parent is the

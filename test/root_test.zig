@@ -822,6 +822,32 @@ test "ParentComponent and ChildrenComponent" {
     try testing.expectEqual(@as(usize, 0), c.count());
 }
 
+test "ChildrenComponent grows past the old 16 cap without dropping (+ no leak)" {
+    // #657: the old `[16]Entity` buffer silently dropped overflow, orphaning
+    // fixtures from teardown. The ArrayList backing has no cap. Using
+    // `testing.allocator` doubles as the heap-ownership guard: if `deinit`
+    // failed to free the backing allocation, the test would fail on a leak.
+    const Children = ChildrenComponent(u32);
+    var c = Children{};
+    defer c.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) c.addChild(testing.allocator, i);
+    try testing.expectEqual(@as(usize, 100), c.count());
+    try testing.expectEqual(@as(u32, 0), c.getChildren()[0]);
+    try testing.expectEqual(@as(u32, 99), c.getChildren()[99]);
+
+    // swapRemove semantics: removing an interior id pulls the last into its
+    // slot, so order is not preserved but every other id survives.
+    c.removeChild(50);
+    try testing.expectEqual(@as(usize, 99), c.count());
+    for (c.getChildren()) |ch| try testing.expect(ch != 50);
+
+    // Removing a non-member is a no-op.
+    c.removeChild(9999);
+    try testing.expectEqual(@as(usize, 99), c.count());
+}
+
 test "ParentComponent is saveable with entity ref" {
     // Regression for #11 — Parent used to have no save declaration, so
     // parent-child hierarchies were lost on save/load and children

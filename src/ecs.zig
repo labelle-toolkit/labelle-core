@@ -235,13 +235,6 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
         pub fn addComponent(self: *Self, entity: EntityType, component: anytype) void {
             const T = @TypeOf(component);
             const storage = self.getOrCreateStorage(T);
-            // If a heap-owning component already sits at this (entity, T) —
-            // e.g. a recycled entity id whose prior owner was tombstoned, not
-            // component-removed — `put` would overwrite it and leak its
-            // allocation. Free the old one first.
-            if (@hasDecl(T, "deinit")) {
-                if (storage.getPtr(entity)) |old| old.deinit(self.allocator);
-            }
             storage.put(entity, component) catch @panic("OOM");
         }
 
@@ -259,11 +252,6 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
 
         pub fn removeComponent(self: *Self, entity: EntityType, comptime T: type) void {
             const storage = self.getStorage(T) orelse return;
-            // Free a heap-owning component's allocation before dropping the
-            // by-value entry (the map runs no destructor).
-            if (@hasDecl(T, "deinit")) {
-                if (storage.getPtr(entity)) |v| v.deinit(self.allocator);
-            }
             _ = storage.remove(entity);
         }
 
@@ -353,14 +341,6 @@ pub fn MockEcsBackend(comptime EntityType: type) type {
                     const id = typeId(T);
                     if (s.storages.get(id)) |raw| {
                         const typed: *std.AutoHashMap(EntityType, T) = @ptrCast(@alignCast(raw));
-                        // Heap-owning components (e.g. `ChildrenComponent`) own
-                        // allocations the by-value map won't free. Run their
-                        // `deinit` before dropping the storage — convention:
-                        // `pub fn deinit(self, allocator)`.
-                        if (@hasDecl(T, "deinit")) {
-                            var vit = typed.valueIterator();
-                            while (vit.next()) |v| v.deinit(s.allocator);
-                        }
                         typed.deinit();
                         s.allocator.destroy(typed);
                     }

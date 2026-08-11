@@ -2823,3 +2823,46 @@ test "conformance: audio suite passes for a minimal (required-only) audio backen
     };
     try conformance.runAudioSuite(MinimalAudio);
 }
+
+// ── Texture identity (RFC-TEXTURE-ID-TYPING, labelle-gfx#328) ─────────
+//
+// These live here rather than beside the types in `src/backend_contract.zig`
+// because inline tests in `src/*.zig` are NOT run by this suite — the
+// module under test is a dependency of this root, and Zig does not collect
+// a dependency module's tests. A copy left in that file passed `zig build
+// test` while asserting the opposite of the truth. See labelle-core#68.
+// Bound through the PACKAGE ROOT, not `root.backend_contract` — that is the
+// path phase-2 consumers use (`core.TextureId`), and binding to the nested
+// module here would let a missing root re-export pass unnoticed.
+const TextureId = root.TextureId;
+const BackendTextureId = root.BackendTextureId;
+
+test "texture ids: reserved zero values" {
+    try std.testing.expectEqual(@as(u32, 0), TextureId.invalid.toInt());
+    try std.testing.expectEqual(@as(u32, 0), BackendTextureId.none.toInt());
+}
+
+test "texture ids: toInt round-trips an explicit @enumFromInt" {
+    // `@enumFromInt` is the deliberate, greppable way to mint one (there is
+    // no `from` helper) — the registry and deserialization use it.
+    const engine_handle: TextureId = @enumFromInt(1 << 31);
+    try std.testing.expectEqual(@as(u32, 1 << 31), engine_handle.toInt());
+
+    const backend_slot: BackendTextureId = @enumFromInt(2);
+    try std.testing.expectEqual(@as(u32, 2), backend_slot.toInt());
+}
+
+test "texture ids: the two spaces are nominally distinct" {
+    // The whole point of RFC-TEXTURE-ID-TYPING. Both are `enum(u32)` and so
+    // share a representation, but they are DIFFERENT types — passing an
+    // engine handle to a backend accessor is a compile error rather than a
+    // silent wrong-texture read (labelle-gfx#326).
+    try std.testing.expect(TextureId != BackendTextureId);
+    try std.testing.expect(TextureId != u32);
+    try std.testing.expect(BackendTextureId != u32);
+
+    // Same underlying tag type, so the conversion the registry performs is
+    // a pure retag with no numeric change.
+    try std.testing.expectEqual(u32, @typeInfo(TextureId).@"enum".tag_type);
+    try std.testing.expectEqual(u32, @typeInfo(BackendTextureId).@"enum".tag_type);
+}

@@ -123,6 +123,11 @@ pub const materialCapabilities = backend_contract.materialCapabilities;
 // RFC §2). Value types + capability introspection; the optional
 // `createRenderTarget`/…/`applyPostPass`/`postPassSupported` decls live on
 // `Backend(Impl)`. The ping-pong stack DRIVER lives in labelle-gfx.
+// Texture identity (RFC-TEXTURE-ID-TYPING, labelle-gfx#328). Re-exported
+// here like every other shared backend-contract value type, so consumers
+// write `core.TextureId` rather than reaching through the nested module.
+pub const TextureId = backend_contract.TextureId;
+pub const BackendTextureId = backend_contract.BackendTextureId;
 pub const RenderTargetId = backend_contract.RenderTargetId;
 pub const render_target_fn_decls = backend_contract.render_target_fn_decls;
 pub const hasRenderTargetSubSurface = backend_contract.hasRenderTargetSubSurface;

@@ -258,6 +258,62 @@ pub fn materialCapabilities(comptime Impl: type) MaterialCapabilities {
 // required-only, byte-identical); the paired-unit consistency ("all five or
 // none") is a SEPARATE optional check (`missingRenderTargetDecls`).
 
+// ── Texture identity (RFC-TEXTURE-ID-TYPING, labelle-gfx#328) ──────────
+//
+// A texture identifier means two DIFFERENT things in this toolkit, and
+// spelling both `u32` is how gfx v1.29.0 silently broke a shipped UI kit:
+// a game handed an engine-facing handle to labelle-bgfx's
+// `nativeTextureHandle`, which indexes the backend's OWN table. It
+// compiled, ran, and rendered a menu with no atlas (labelle-gfx#326).
+//
+// These two types make that a compile error. They are deliberately NOT
+// interchangeable and deliberately offer no `from(u32)` constructor —
+// see the note on `TextureId` below.
+
+/// Engine-facing texture handle, allocated by the renderer's texture
+/// registry (labelle-gfx's `RetainedEngine`) — NOT by a backend, and NOT
+/// derived from any backend value. This is what `loadTextureFromMemory`
+/// returns, what a `Sprite` stores, and what the engine's atlas records.
+///
+/// `0` is the reserved invalid handle.
+///
+/// **No `from(u32)`, on purpose.** A helper that mints one of these out
+/// of an arbitrary integer is precisely the hole this type exists to
+/// close: it lets a backend id be spelled as an engine handle silently.
+/// Code that genuinely must construct one — the registry that allocates
+/// them, and deserialization — writes `@enumFromInt` explicitly, which
+/// is greppable and reviewable. Everyone else resolves through the
+/// registry.
+pub const TextureId = enum(u32) {
+    invalid = 0,
+    _,
+
+    pub fn toInt(self: TextureId) u32 {
+        return @intFromEnum(self);
+    }
+};
+
+/// A backend's OWN texture identifier — the value that backend's internal
+/// tables are keyed by (labelle-bgfx's `texture_handles[id]`, sokol's
+/// `sg.Image` slot, raylib's GL name). Carried in the backend's `Texture`
+/// struct and accepted by backend-native accessors such as
+/// `nativeTextureHandle`.
+///
+/// Obtainable ONLY by resolving a `TextureId` through the renderer's
+/// registry, which is the single place that knows the mapping. The two
+/// numbering spaces are independent and have collided in practice
+/// (labelle-toolkit/labelle-engine#813).
+///
+/// `0` is the reserved "no texture" value.
+pub const BackendTextureId = enum(u32) {
+    none = 0,
+    _,
+
+    pub fn toInt(self: BackendTextureId) u32 {
+        return @intFromEnum(self);
+    }
+};
+
 /// A backend-native offscreen render-target handle. Plain `u32` — the same
 /// opaque-handle shape the `game.*RenderTarget` forwarders already pass STRAIGHT
 /// THROUGH (no catalog mapping), and what `applyPostPass` reads/writes. `0` is

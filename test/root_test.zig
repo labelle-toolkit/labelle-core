@@ -2831,8 +2831,11 @@ test "conformance: audio suite passes for a minimal (required-only) audio backen
 // module under test is a dependency of this root, and Zig does not collect
 // a dependency module's tests. A copy left in that file passed `zig build
 // test` while asserting the opposite of the truth. See labelle-core#68.
-const TextureId = backend_contract.TextureId;
-const BackendTextureId = backend_contract.BackendTextureId;
+// Bound through the PACKAGE ROOT, not `root.backend_contract` — that is the
+// path phase-2 consumers use (`core.TextureId`), and binding to the nested
+// module here would let a missing root re-export pass unnoticed.
+const TextureId = root.TextureId;
+const BackendTextureId = root.BackendTextureId;
 
 test "texture ids: reserved zero values" {
     try std.testing.expectEqual(@as(u32, 0), TextureId.invalid.toInt());

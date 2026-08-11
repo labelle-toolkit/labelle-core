@@ -352,9 +352,11 @@ test "Saveable: post_load_add markers" {
         workstation: u64 = 0,
     };
 
-    const markers = getPostLoadMarkers(Eis);
+    const markers = comptime getPostLoadMarkers(Eis);
     try testing.expectEqual(@as(usize, 1), markers.len);
-    try testing.expect(markers[0] == NeedsClosestNode);
+    // `markers` holds TYPES, so the comparison has to happen at comptime —
+    // loading a `type` value at runtime is not a thing.
+    comptime std.debug.assert(markers[0] == NeedsClosestNode);
 }
 
 test "Saveable: postLoad hook" {

@@ -233,7 +233,7 @@ fn remapIntOrOptInt(comptime FieldType: type, field_ptr: *FieldType, id_map: *co
 pub const remapEntityRefsAuto = remapEntityRefs;
 
 /// Auto-detect skipField based on save declarations (new or legacy style).
-pub fn autoSkipField(T: type, field_name: []const u8) bool {
+pub fn autoSkipField(comptime T: type, field_name: []const u8) bool {
     return sp.shouldSkipField(T, field_name);
 }
 

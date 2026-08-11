@@ -236,3 +236,31 @@ pub fn EntityInfo(comptime Entity: type) type {
     };
 }
 
+
+// Collect the inline `test` blocks in `src/*.zig` (labelle-core#68).
+//
+// Zig gathers tests only from files it actually ANALYSES, and a
+// `pub const x = @import("...")` above is analysed lazily — so a submodule
+// whose decls nothing referenced contributed zero tests. `zig build test`
+// reported green while a test in such a file asserted a falsehood; that is how
+// three tests added beside `TextureId` in #67 ran not at all.
+//
+// Explicit imports rather than `refAllDecls`: forcing every declaration fails
+// on the comptime-only generics in `serde.zig` and `save_policy.zig`
+// ("cannot load comptime-only type", "unable to resolve comptime value"), and
+// `refAllDeclsRecursive` no longer exists in Zig 0.16.
+//
+// `serde.zig` is deliberately ABSENT: analysing it surfaces pre-existing
+// compile errors ("unable to resolve comptime value", "missing struct field:
+// items") in code that has never been type-checked, because nothing ever
+// analysed the file. Its 16 inline tests stay uncollected until those are
+// fixed — tracked separately rather than bundled into this wiring change.
+//
+// Add a line here when a `src/*.zig` gains its first inline test.
+test {
+    _ = @import("android_backend.zig");
+    _ = @import("gamepad.zig");
+    _ = @import("save_policy.zig");
+    _ = @import("typed_log.zig");
+    _ = @import("video.zig");
+}

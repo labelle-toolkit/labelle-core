@@ -2830,7 +2830,7 @@ test "conformance: audio suite passes for a minimal (required-only) audio backen
 // because inline tests in `src/*.zig` are NOT run by this suite — the
 // module under test is a dependency of this root, and Zig does not collect
 // a dependency module's tests. A copy left in that file passed `zig build
-// test` while asserting the opposite of the truth. See labelle-core#67.
+// test` while asserting the opposite of the truth. See labelle-core#68.
 const TextureId = backend_contract.TextureId;
 const BackendTextureId = backend_contract.BackendTextureId;
 

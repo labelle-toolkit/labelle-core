@@ -18,6 +18,7 @@ const LogSinkInterface = root.LogSinkInterface;
 const StubLogSink = root.StubLogSink;
 const StderrLogSink = root.StderrLogSink;
 const GizmoInterface = root.GizmoInterface;
+const GizmoDraw = root.GizmoDraw;
 const StubGizmos = root.StubGizmos;
 const RenderInterface = root.RenderInterface;
 const StubRender = root.StubRender;
@@ -709,6 +710,34 @@ test "GizmoInterface(StubGizmos) draws and counts" {
     try testing.expectEqual(1, StubGizmos.getRectCount());
     try testing.expectEqual(1, StubGizmos.getCircleCount());
     try testing.expectEqual(1, StubGizmos.getTextCount());
+}
+
+test "GizmoDraw.text defaults to empty and round-trips" {
+    // Every pre-existing construction site omits `.text`; the default keeps
+    // them compiling and leaves non-text kinds with nothing to render.
+    const line: GizmoDraw = .{ .kind = .line, .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 10 };
+    try testing.expectEqual(@as(usize, 0), line.text.len);
+    try testing.expectEqualStrings("", line.text);
+
+    // A `.text` draw carries its characters through by BORROW: the slice on the
+    // draw aliases the caller's storage, it is not a copy. `renderGizmoDraws`
+    // sees exactly these bytes, and only for the duration of that call.
+    var arena: [16]u8 = undefined;
+    const label = try std.fmt.bufPrint(&arena, "fps {d}", .{60});
+    const draw: GizmoDraw = .{ .kind = .text, .x1 = 4, .y1 = 8, .text = label, .space = .screen };
+
+    try testing.expectEqual(GizmoDraw.Kind.text, draw.kind);
+    try testing.expectEqualStrings("fps 60", draw.text);
+    try testing.expectEqual(label.ptr, draw.text.ptr);
+
+    // Borrowed, so a write through the owner's buffer is visible on the draw.
+    @memcpy(arena[4..6], "12");
+    try testing.expectEqualStrings("fps 12", draw.text);
+
+    // The field survives a by-value copy of the draw (the slice, not the bytes).
+    const forwarded = draw;
+    try testing.expectEqualStrings("fps 12", forwarded.text);
+    try testing.expectEqual(GizmoDraw.Space.screen, forwarded.space);
 }
 
 test "RenderInterface(StubRender) validates" {

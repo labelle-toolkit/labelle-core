@@ -11,6 +11,31 @@ pub const GizmoDraw = struct {
     y2: f32 = 0, // height for rect, end_y for line/arrow
     color: u32 = 0xFF00FF00, // default green (ARGB)
     group: []const u8 = "",
+    /// Characters for a `.text` draw; empty (and ignored) for every other kind.
+    ///
+    /// **Lifetime: BORROWED — valid only for the duration of the
+    /// `renderGizmoDraws` call that receives this draw.** The `GizmoDraw` does
+    /// not own these bytes. A renderer must paint (or copy) the string *inside*
+    /// that call and must never retain the slice past its return. Whoever
+    /// assembles the draw list owns the storage and is responsible for keeping
+    /// it alive across the call — in practice a per-frame arena that is only
+    /// cleared once the frame's gizmos have been flushed.
+    ///
+    /// This is deliberately the OPPOSITE of labelle-engine's caller-facing
+    /// `drawGizmoText`, which *copies* the string into exactly such an arena.
+    /// The two are different layers with different callers, not an
+    /// inconsistency:
+    ///
+    ///   - The engine's natural caller is a formatted number in a stack buffer
+    ///     (`std.fmt.bufPrint(&buf, "{d}", .{fps})`). Under a borrow contract
+    ///     the obvious usage would dangle the moment `buf` leaves scope, so the
+    ///     engine takes a copy and frees the caller of the lifetime question.
+    ///   - By the time a draw reaches this field the bytes already live in a
+    ///     frame arena that outlives the render call, so borrowing is free and
+    ///     a second copy per text draw per frame would buy nothing.
+    ///
+    /// Borrowed is right at this layer; copied is right at that one.
+    text: []const u8 = "",
     space: Space = .world,
     /// Category index for per-category enable/disable. 0 = "all" (uncategorized).
     category: u8 = 0,

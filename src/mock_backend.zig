@@ -185,6 +185,12 @@ pub const MockBackend = struct {
     threadlocal var screen_width_val: i32 = 800;
     threadlocal var screen_height_val: i32 = 600;
     threadlocal var texture_counter: u32 = 1;
+    /// Filter of the most recent `uploadTextureFiltered` call (texture-filter
+    /// seam, labelle-core#71). Reset to the contract default so a test can tell
+    /// "nobody asked" from "somebody asked for linear" only via
+    /// `filtered_upload_calls` below.
+    threadlocal var last_upload_filter: backend_mod.TextureFilter = backend_mod.DEFAULT_TEXTURE_FILTER;
+    threadlocal var filtered_upload_calls: u32 = 0;
     threadlocal var font_atlas_counter: u32 = 1;
     threadlocal var font_atlas_unload_calls: u32 = 0;
     threadlocal var in_camera_mode: bool = false;
@@ -238,6 +244,8 @@ pub const MockBackend = struct {
         texture_counter = 1;
         font_atlas_counter = 1;
         font_atlas_unload_calls = 0;
+        last_upload_filter = backend_mod.DEFAULT_TEXTURE_FILTER;
+        filtered_upload_calls = 0;
         in_camera_mode = false;
         render_target_counter = 1;
         active_render_target = 0;
@@ -293,6 +301,8 @@ pub const MockBackend = struct {
         texture_counter = 1;
         font_atlas_counter = 1;
         font_atlas_unload_calls = 0;
+        last_upload_filter = backend_mod.DEFAULT_TEXTURE_FILTER;
+        filtered_upload_calls = 0;
         in_camera_mode = false;
         render_target_counter = 1;
         active_render_target = 0;
@@ -664,6 +674,29 @@ pub const MockBackend = struct {
             .width = @intCast(decoded.width),
             .height = @intCast(decoded.height),
         };
+    }
+
+    /// Optional texture-filter seam (labelle-core#71): the mock opts in so the
+    /// `Backend(Impl)` dispatch (and the degrade on a backend WITHOUT this
+    /// decl) is testable. Records the requested filter; otherwise identical to
+    /// `uploadTexture`.
+    pub fn uploadTextureFiltered(
+        decoded: backend_mod.DecodedImage,
+        filter: backend_mod.TextureFilter,
+    ) !Texture {
+        last_upload_filter = filter;
+        filtered_upload_calls += 1;
+        return uploadTexture(decoded);
+    }
+
+    /// The filter of the most recent `uploadTextureFiltered` call.
+    pub fn getLastUploadFilter() backend_mod.TextureFilter {
+        return last_upload_filter;
+    }
+
+    /// How many times the filtered upload path was taken since the last reset.
+    pub fn getFilteredUploadCount() u32 {
+        return filtered_upload_calls;
     }
 
     pub fn unloadTexture(_: Texture) void {}

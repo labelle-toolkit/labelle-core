@@ -2599,6 +2599,226 @@ test "postFxCapabilities: reports the mock's advertised passes; empty for a post
     B.endRenderTarget();
 }
 
+// ── Texture-sampling seam (point/nearest filtering, labelle-core#71) ─────────
+
+test "texture-filter seam is OPTIONAL: it is not a required decl and a backend without it still passes assertBackend" {
+    // The whole point of the seam: `uploadTextureFiltered` must NOT appear in
+    // any required-decl list, so every already-shipped backend keeps validating
+    // byte-identically. `MinimalBackend` declares none of the optional decls.
+    inline for (root.required_fn_decls) |name| {
+        try testing.expect(!std.mem.eql(u8, name, "uploadTextureFiltered"));
+        try testing.expect(!std.mem.eql(u8, name, "loadTextureFromMemoryFiltered"));
+    }
+    inline for (root.loader_fn_decls) |name| {
+        try testing.expect(!std.mem.eql(u8, name, "uploadTextureFiltered"));
+    }
+
+    try testing.expect(!@hasDecl(MinimalBackend, "uploadTextureFiltered"));
+    try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(MinimalBackend).len);
+    try testing.expectEqual(@as(usize, 0), comptime root.missingBackendDeclsBySubSurface(MinimalBackend).len);
+    try testing.expect(!comptime root.hasTextureFilterSeam(MinimalBackend));
+}
+
+test "textureFilterCapabilities: linear is always advertised; point needs the seam" {
+    // The mock opts into the seam → both filters.
+    try testing.expect(comptime root.hasTextureFilterSeam(MockBackend));
+    const caps = comptime root.textureFilterCapabilities(MockBackend);
+    try testing.expectEqual(@as(usize, 2), caps.filters.len);
+    try testing.expectEqual(root.TextureFilter.linear, caps.filters[0]);
+    try testing.expectEqual(root.TextureFilter.point, caps.filters[1]);
+
+    // A backend without the seam still advertises `.linear` — that is simply
+    // what a plain `uploadTexture` has always produced — and nothing else.
+    const empty = comptime root.textureFilterCapabilities(MinimalBackend);
+    try testing.expectEqual(@as(usize, 1), empty.filters.len);
+    try testing.expectEqual(root.TextureFilter.linear, empty.filters[0]);
+
+    const B = Backend(MinimalBackend);
+    try testing.expect(!B.hasTextureFilter());
+    try testing.expect(B.textureFilterSupported(.linear));
+    try testing.expect(!B.textureFilterSupported(.point));
+
+    const M = Backend(MockBackend);
+    try testing.expect(M.hasTextureFilter());
+    try testing.expect(M.textureFilterSupported(.linear));
+    try testing.expect(M.textureFilterSupported(.point));
+}
+
+test "the contract default filter is linear (unchanged behaviour), and the enum has exactly the two documented values" {
+    try testing.expectEqual(root.TextureFilter.linear, root.DEFAULT_TEXTURE_FILTER);
+    // Freeze the set: adding a filter is a contract change, not a drive-by.
+    try testing.expectEqual(@as(usize, 2), std.enums.values(root.TextureFilter).len);
+}
+
+test "Backend.uploadTextureFiltered forwards the filter to a backend that has the seam" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    const decoded = try B.decodeImage("png", "x", testing.allocator);
+    defer testing.allocator.free(decoded.pixels);
+
+    const tex = try B.uploadTextureFiltered(decoded, .point);
+    try testing.expectEqual(@as(i32, 1), tex.width);
+    try testing.expectEqual(@as(u32, 1), MockBackend.getFilteredUploadCount());
+    try testing.expectEqual(root.TextureFilter.point, MockBackend.getLastUploadFilter());
+
+    _ = try B.uploadTextureFiltered(decoded, .linear);
+    try testing.expectEqual(@as(u32, 2), MockBackend.getFilteredUploadCount());
+    try testing.expectEqual(root.TextureFilter.linear, MockBackend.getLastUploadFilter());
+}
+
+test "Backend.uploadTextureFiltered degrades to a plain upload on a backend without the seam" {
+    // A `.point` request against a seamless backend is a QUALITY degradation,
+    // never an error: the texture must still upload.
+    const B = Backend(MinimalBackend);
+    const decoded = try B.decodeImage("png", "x", testing.allocator);
+    defer testing.allocator.free(decoded.pixels);
+    const tex = try B.uploadTextureFiltered(decoded, .point);
+    try testing.expectEqual(@as(u32, 2), tex.id); // MinimalBackend.uploadTexture's id
+}
+
+test "Backend.uploadTextureFiltered honours a fine-grained textureFilterSupported decline" {
+    // Two-level gating, exactly like `postPassSupported`: a backend may declare
+    // the seam and still decline a specific filter, which degrades to
+    // `uploadTexture` rather than calling the filtered decl with a filter the
+    // backend cannot honour.
+    // A `Backend(Impl)` instantiation runs `assertBackend`, so the fixture has
+    // to satisfy the REQUIRED contract — `MinimalBackend`'s surface, plus the
+    // optional seam and the fine-grained decline.
+    const PickyBackend = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1 };
+        const C = @This().Color;
+
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+        var filtered: usize = 0;
+        var plain: usize = 0;
+
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 1, .height = 1 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            plain += 1;
+            return .{ .id = 1 };
+        }
+        pub fn uploadTextureFiltered(_: root.DecodedImage, _: root.TextureFilter) !Texture {
+            filtered += 1;
+            return .{ .id = 2 };
+        }
+        /// Declares the seam but cannot do nearest sampling.
+        pub fn textureFilterSupported(filter: root.TextureFilter) bool {
+            return filter == .linear;
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+    };
+
+    const caps = comptime root.textureFilterCapabilities(PickyBackend);
+    try testing.expectEqual(@as(usize, 1), caps.filters.len);
+    try testing.expectEqual(root.TextureFilter.linear, caps.filters[0]);
+
+    const B = Backend(PickyBackend);
+    try testing.expect(B.hasTextureFilter());
+    try testing.expect(!B.textureFilterSupported(.point));
+
+    const decoded = try B.decodeImage("png", "x", testing.allocator);
+    defer testing.allocator.free(decoded.pixels);
+
+    _ = try B.uploadTextureFiltered(decoded, .point); // declined → plain upload
+    try testing.expectEqual(@as(usize, 0), PickyBackend.filtered);
+    try testing.expectEqual(@as(usize, 1), PickyBackend.plain);
+
+    _ = try B.uploadTextureFiltered(decoded, .linear); // accepted → filtered
+    try testing.expectEqual(@as(usize, 1), PickyBackend.filtered);
+    try testing.expectEqual(@as(usize, 1), PickyBackend.plain);
+}
+
+test "loadTextureFromMemoryFiltered routes the decode path through the filtered upload" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    const tex = try B.loadTextureFromMemoryFiltered("png", "not-compressed", .point);
+    try testing.expectEqual(@as(i32, 1), tex.width); // the 1×1 decode stub
+    try testing.expectEqual(@as(u32, 1), MockBackend.getFilteredUploadCount());
+    try testing.expectEqual(root.TextureFilter.point, MockBackend.getLastUploadFilter());
+}
+
+test "loadTextureFromMemoryFiltered leaves the GPU-compressed fast path alone" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    // A compressed blob has no filter parameter in the contract, so it still
+    // goes straight to `uploadCompressed` (sentinel 4096×4096) and never
+    // reaches the filtered upload.
+    const tex = try B.loadTextureFromMemoryFiltered("astc", "MOCKblob", .point);
+    try testing.expectEqual(@as(i32, 4096), tex.width);
+    try testing.expectEqual(@as(u32, 0), MockBackend.getFilteredUploadCount());
+}
+
+test "the unfiltered loader path is untouched: loadTextureFromMemory never enters the filtered seam" {
+    // Default preservation, asserted rather than asserted-by-review: the
+    // pre-#71 entry points must keep dispatching straight to `Impl.uploadTexture`
+    // so a backend that keeps its OWN default-filter state (labelle-bgfx's
+    // `setTextureFilter`) still gets to apply it.
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    _ = try B.loadTextureFromMemory("png", "not-compressed");
+    const decoded = try B.decodeImage("png", "x", testing.allocator);
+    defer testing.allocator.free(decoded.pixels);
+    _ = try B.uploadTexture(decoded);
+
+    try testing.expectEqual(@as(u32, 0), MockBackend.getFilteredUploadCount());
+}
+
+test "the texture-filter seam bumps no contract version" {
+    // The file's rule: optional, `@hasDecl`-gated additions are non-breaking.
+    // No required decl, no signature change, no `extern struct` field — so all
+    // three numbers stay where they were.
+    try testing.expectEqual(@as(u32, 1), root.LOADER_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.DRAW_CONTRACT_VERSION);
+    try testing.expectEqual(@as(u32, 1), root.BACKEND_CONTRACT_VERSION);
+}
+
 // ---------------------------------------------------------------------------
 // Behavioral conformance suites (labelle-assembler#453).
 //

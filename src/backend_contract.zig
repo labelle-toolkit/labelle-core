@@ -66,7 +66,9 @@ pub const DecodedImage = struct {
 /// neighbours of a tightly packed 16px tile, drawing a seam grid over the map.
 ///
 /// A backend that cannot honour `.point` is not in violation — it simply
-/// samples as it always did (advertise that through `textureFilterSupported`).
+/// samples as it always did (advertise that by declining `.point` from the
+/// optional `Impl.textureFilterSupported`). `.linear` is NOT declinable: it is
+/// the plain `uploadTexture` path, which every backend is required to have.
 pub const TextureFilter = enum {
     /// Bilinear sampling — every backend's pre-#71 behaviour.
     linear,
@@ -90,19 +92,41 @@ pub const DEFAULT_TEXTURE_FILTER: TextureFilter = .linear;
 /// mirror and warn-once tables, NOT `assertBackend`.
 pub const TextureFilterCapabilities = struct { filters: []const TextureFilter };
 
-/// Which sampling filters `Impl` advertises. `.linear` is ALWAYS present — it
-/// is what a plain `uploadTexture` has always produced. `.point` requires the
-/// optional `uploadTextureFiltered` decl, and may additionally be declined by
-/// the optional fine-grained `Impl.textureFilterSupported(filter)` (absent ⇒
-/// every filter the seam can express). Comptime introspection, analogous to
-/// `materialCapabilities` — an OPTIONAL capability, never a required one.
+/// Whether `Impl` advertises `filter`. The ONE place that decision is made:
+/// both `textureFilterCapabilities` (comptime manifest) and
+/// `Backend(Impl).textureFilterSupported` (runtime mirror) route through here,
+/// so the two cannot drift apart. See `textureFilterCapabilities` for the rules.
+inline fn advertisesTextureFilter(comptime Impl: type, filter: TextureFilter) bool {
+    // `.linear` is UNCONDITIONAL and is never put to `Impl`: it is produced by
+    // a plain `Impl.uploadTexture`, which is a REQUIRED decl, so every backend
+    // that exists at all has it. The two optional hooks below gate the seam,
+    // and the seam only ever adds filters on top of that baseline.
+    if (filter == .linear) return true;
+    if (!@hasDecl(Impl, "uploadTextureFiltered")) return false;
+    if (@hasDecl(Impl, "textureFilterSupported")) return Impl.textureFilterSupported(filter);
+    return true;
+}
+
+/// Which sampling filters `Impl` advertises. Comptime introspection, analogous
+/// to `materialCapabilities` — an OPTIONAL capability, never a required one.
+///
+/// INVARIANT: `.linear` is in `filters` for EVERY `Impl`, with no exception and
+/// no way for a backend to opt out. It is what a plain `uploadTexture` produces
+/// and `uploadTexture` is a required decl, so the baseline filter is always
+/// deliverable. `Impl.textureFilterSupported` is NOT consulted for `.linear`:
+/// an `Impl` that returns false for it (e.g. because it reports only the
+/// filters it routes through `uploadTextureFiltered`) does not remove `.linear`
+/// from the manifest — such a filter still uploads, via the plain path.
+///
+/// Every OTHER filter is opt-in twice over: it needs the optional
+/// `uploadTextureFiltered` decl, and may then be declined individually by the
+/// optional fine-grained `Impl.textureFilterSupported(filter)` (absent ⇒ every
+/// filter the seam can express).
 pub fn textureFilterCapabilities(comptime Impl: type) TextureFilterCapabilities {
     comptime {
         var filters: []const TextureFilter = &.{};
         for (std.enums.values(TextureFilter)) |f| {
-            // `.linear` needs no seam — it IS what a plain `uploadTexture` does.
-            if (f != .linear and !@hasDecl(Impl, "uploadTextureFiltered")) continue;
-            if (@hasDecl(Impl, "textureFilterSupported") and !Impl.textureFilterSupported(f)) continue;
+            if (!advertisesTextureFilter(Impl, f)) continue;
             filters = filters ++ [_]TextureFilter{f};
         }
         return .{ .filters = filters };
@@ -1117,14 +1141,17 @@ pub fn Backend(comptime Impl: type) type {
             return comptime hasTextureFilterSeam(Impl);
         }
 
-        /// True if `Impl` advertises `filter`. `.linear` is always supported
-        /// (plain `uploadTexture`); anything else needs the seam, and may be
-        /// declined by the optional fine-grained `Impl.textureFilterSupported`.
-        /// Two-level gating, exactly like `postPassSupported`.
+        /// True if `Impl` advertises `filter`. Runtime mirror of the comptime
+        /// `textureFilterCapabilities`, sharing its single implementation, so
+        /// this answers `true` for exactly the filters in that manifest.
+        ///
+        /// `.linear` is ALWAYS true and never put to `Impl` — it is the plain
+        /// `uploadTexture` path, a required decl. Anything else needs the seam
+        /// and may be declined by the optional fine-grained
+        /// `Impl.textureFilterSupported`: two-level gating, like
+        /// `postPassSupported`.
         pub inline fn textureFilterSupported(filter: TextureFilter) bool {
-            if (filter != .linear and !@hasDecl(Impl, "uploadTextureFiltered")) return false;
-            if (@hasDecl(Impl, "textureFilterSupported")) return Impl.textureFilterSupported(filter);
-            return true;
+            return advertisesTextureFilter(Impl, filter);
         }
 
         /// `uploadTexture` with an explicit sampling `filter`. Same threading
@@ -1135,7 +1162,9 @@ pub fn Backend(comptime Impl: type) type {
         /// Degrades to a plain `Impl.uploadTexture` when the backend has no
         /// `uploadTextureFiltered` (or declines this filter): the texture still
         /// uploads, just with the backend's default sampling — a quality
-        /// degradation, not a contract violation.
+        /// degradation, not a contract violation. For `.linear` that degrade is
+        /// not even a degradation: the plain path IS the linear path, which is
+        /// why `textureFilterSupported(.linear)` can promise `true` outright.
         pub inline fn uploadTextureFiltered(decoded: DecodedImage, filter: TextureFilter) !Texture {
             if (@hasDecl(Impl, "uploadTextureFiltered")) {
                 if (!@hasDecl(Impl, "textureFilterSupported") or Impl.textureFilterSupported(filter)) {

@@ -2780,6 +2780,108 @@ test "loadTextureFromMemoryFiltered routes the decode path through the filtered 
     try testing.expectEqual(root.TextureFilter.point, MockBackend.getLastUploadFilter());
 }
 
+/// A backend that declares the seam but whose fine-grained
+/// `textureFilterSupported` says NO to everything — the plausible shape of an
+/// impl that only reports the filters it routes through `uploadTextureFiltered`
+/// and forgets that `.linear` is served by the plain `uploadTexture` path.
+const RefusesEveryFilterBackend = struct {
+    pub const Texture = struct { id: u32 };
+    pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+    pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+    pub const Vector2 = struct { x: f32, y: f32 };
+    pub const Camera2D = struct { zoom: f32 = 1 };
+    const C = @This().Color;
+
+    pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+    pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+    pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+    pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+    var filtered: usize = 0;
+    var plain: usize = 0;
+
+    pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+    pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+    pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+    pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+    pub fn drawPolygon(_: []const Vector2, _: C) void {}
+    pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+    pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+    pub fn loadTexture(_: [:0]const u8) !Texture {
+        return .{ .id = 1 };
+    }
+    pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+        const pixels = try allocator.alloc(u8, 4);
+        @memset(pixels, 0);
+        return .{ .pixels = pixels, .width = 1, .height = 1 };
+    }
+    pub fn uploadTexture(_: root.DecodedImage) !Texture {
+        plain += 1;
+        return .{ .id = 1 };
+    }
+    pub fn uploadTextureFiltered(_: root.DecodedImage, _: root.TextureFilter) !Texture {
+        filtered += 1;
+        return .{ .id = 2 };
+    }
+    /// Reports only what it routes through `uploadTextureFiltered` — nothing.
+    pub fn textureFilterSupported(_: root.TextureFilter) bool {
+        return false;
+    }
+    pub fn unloadTexture(_: Texture) void {}
+    pub fn beginMode2D(_: Camera2D) void {}
+    pub fn endMode2D() void {}
+    pub fn getScreenWidth() i32 {
+        return 640;
+    }
+    pub fn getScreenHeight() i32 {
+        return 480;
+    }
+    pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+        return pos;
+    }
+    pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+        return pos;
+    }
+    pub fn setDesignSize(_: i32, _: i32) void {}
+};
+
+test "an Impl cannot decline .linear: the fine-grained hook governs non-linear filters only" {
+    // The invariant, asserted rather than merely documented: `.linear` is the
+    // plain `uploadTexture` path, `uploadTexture` is a REQUIRED decl, so no
+    // backend can be without it — `Impl.textureFilterSupported` is therefore
+    // never consulted for `.linear`, and a blanket `false` must NOT strip the
+    // baseline filter out of the manifest.
+    const caps = comptime root.textureFilterCapabilities(RefusesEveryFilterBackend);
+    try testing.expectEqual(@as(usize, 1), caps.filters.len);
+    try testing.expectEqual(root.TextureFilter.linear, caps.filters[0]);
+
+    // The runtime mirror must agree with the comptime manifest, filter for
+    // filter — the two used to consult the hook independently and could drift.
+    const B = Backend(RefusesEveryFilterBackend);
+    try testing.expect(B.hasTextureFilter());
+    try testing.expect(B.textureFilterSupported(.linear));
+    try testing.expect(!B.textureFilterSupported(.point));
+    inline for (comptime std.enums.values(root.TextureFilter)) |f| {
+        const in_manifest = comptime blk: {
+            for (caps.filters) |c| {
+                if (c == f) break :blk true;
+            }
+            break :blk false;
+        };
+        try testing.expectEqual(in_manifest, B.textureFilterSupported(f));
+    }
+
+    // And the advertised filter is actually deliverable: a `.linear` upload
+    // still lands, via the plain path the decline steers it to.
+    const decoded = try B.decodeImage("png", "x", testing.allocator);
+    defer testing.allocator.free(decoded.pixels);
+    _ = try B.uploadTextureFiltered(decoded, .linear);
+    try testing.expectEqual(@as(usize, 0), RefusesEveryFilterBackend.filtered);
+    try testing.expectEqual(@as(usize, 1), RefusesEveryFilterBackend.plain);
+}
+
 test "loadTextureFromMemoryFiltered leaves the GPU-compressed fast path alone" {
     MockBackend.initMock(testing.allocator);
     defer MockBackend.deinitMock();

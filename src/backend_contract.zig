@@ -43,6 +43,104 @@ pub const DecodedImage = struct {
     height: u32,
 };
 
+// ── Texture-sampling seam (point/nearest filtering, labelle-core#71) ─────────
+// Companion to labelle-bgfx#77/#78, which implements the backend half. Every
+// game texture used to be uploaded with clamp flags and nothing else, leaving
+// the backend on its default BILINEAR filter — at any zoom above 1:1 a tightly
+// packed pixel-art atlas bleeds its neighbours along every tile edge, and there
+// was no knob anywhere in the stack to ask for nearest sampling.
+//
+// The seam is OPTIONAL and `@hasDecl`-gated, exactly like the material and
+// render-target seams: a backend opts in with `pub fn uploadTextureFiltered`,
+// `uploadTextureFiltered` is NOT in `REQUIRED_DECLS`/`loader_fn_decls`, and a
+// backend without it keeps passing `assertBackend` byte-identically (the
+// wrapper degrades to a plain `uploadTexture`, i.e. the backend's own default
+// filter). Purely additive ⇒ NO `*_CONTRACT_VERSION` bump, per this file's rule
+// ("optional (`@hasDecl`-gated) additions are non-breaking").
+
+/// How the GPU samples a texture between texels (labelle-core#71).
+///
+/// `.linear` is what every backend has always done (bilinear) and stays the
+/// contract's default — see `DEFAULT_TEXTURE_FILTER`. `.point` (nearest) is
+/// what pixel art wants: at 2× zoom a bilinear filter blends in the atlas
+/// neighbours of a tightly packed 16px tile, drawing a seam grid over the map.
+///
+/// A backend that cannot honour `.point` is not in violation — it simply
+/// samples as it always did (advertise that by declining `.point` from the
+/// optional `Impl.textureFilterSupported`). `.linear` is NOT declinable: it is
+/// the plain `uploadTexture` path, which every backend is required to have.
+pub const TextureFilter = enum {
+    /// Bilinear sampling — every backend's pre-#71 behaviour.
+    linear,
+    /// Nearest-neighbour sampling — crisp pixel art, no atlas bleed.
+    point,
+};
+
+/// The filter an upload gets when nobody asks for one.
+///
+/// DELIBERATELY `.linear`: flipping it to `.point` would change how every
+/// already-shipped game looks, and this seam is additive by construction. The
+/// originating issue (labelle-engine#824) argues a 2D pixel-art engine should
+/// default to `.point`; that is a decision for whoever wires a `filter` field
+/// through gfx/engine, not for the ABI home of the enum. Callers that want
+/// point sampling ask for it per upload.
+pub const DEFAULT_TEXTURE_FILTER: TextureFilter = .linear;
+
+/// The sampling filters a backend `Impl` advertises (see
+/// `textureFilterCapabilities`). Same role as `MaterialCapabilities` /
+/// `PostFxCapabilities`: it feeds the provider manifest's `.capabilities`
+/// mirror and warn-once tables, NOT `assertBackend`.
+pub const TextureFilterCapabilities = struct { filters: []const TextureFilter };
+
+/// Whether `Impl` advertises `filter`. The ONE place that decision is made:
+/// both `textureFilterCapabilities` (comptime manifest) and
+/// `Backend(Impl).textureFilterSupported` (runtime mirror) route through here,
+/// so the two cannot drift apart. See `textureFilterCapabilities` for the rules.
+inline fn advertisesTextureFilter(comptime Impl: type, filter: TextureFilter) bool {
+    // `.linear` is UNCONDITIONAL and is never put to `Impl`: it is produced by
+    // a plain `Impl.uploadTexture`, which is a REQUIRED decl, so every backend
+    // that exists at all has it. The two optional hooks below gate the seam,
+    // and the seam only ever adds filters on top of that baseline.
+    if (filter == .linear) return true;
+    if (!@hasDecl(Impl, "uploadTextureFiltered")) return false;
+    if (@hasDecl(Impl, "textureFilterSupported")) return Impl.textureFilterSupported(filter);
+    return true;
+}
+
+/// Which sampling filters `Impl` advertises. Comptime introspection, analogous
+/// to `materialCapabilities` — an OPTIONAL capability, never a required one.
+///
+/// INVARIANT: `.linear` is in `filters` for EVERY `Impl`, with no exception and
+/// no way for a backend to opt out. It is what a plain `uploadTexture` produces
+/// and `uploadTexture` is a required decl, so the baseline filter is always
+/// deliverable. `Impl.textureFilterSupported` is NOT consulted for `.linear`:
+/// an `Impl` that returns false for it (e.g. because it reports only the
+/// filters it routes through `uploadTextureFiltered`) does not remove `.linear`
+/// from the manifest — such a filter still uploads, via the plain path.
+///
+/// Every OTHER filter is opt-in twice over: it needs the optional
+/// `uploadTextureFiltered` decl, and may then be declined individually by the
+/// optional fine-grained `Impl.textureFilterSupported(filter)` (absent ⇒ every
+/// filter the seam can express).
+pub fn textureFilterCapabilities(comptime Impl: type) TextureFilterCapabilities {
+    comptime {
+        var filters: []const TextureFilter = &.{};
+        for (std.enums.values(TextureFilter)) |f| {
+            if (!advertisesTextureFilter(Impl, f)) continue;
+            filters = filters ++ [_]TextureFilter{f};
+        }
+        return .{ .filters = filters };
+    }
+}
+
+/// True iff `Impl` implements the optional texture-filter seam (i.e. declares
+/// `uploadTextureFiltered`). Whole-seam gate, mirroring
+/// `hasRenderTargetSubSurface`; false ⇒ every upload uses the backend's own
+/// default filter and a `.point` request silently degrades.
+pub fn hasTextureFilterSeam(comptime Impl: type) bool {
+    return comptime @hasDecl(Impl, "uploadTextureFiltered");
+}
+
 /// Codepoint range to bake glyphs for, half-open [first, last).
 /// Used by `FontBakeParams` to drive `decodeFont`. Phase 4 of the Asset
 /// Streaming RFC (labelle-engine#448).
@@ -104,7 +202,7 @@ pub const FontBakeParams = struct {
 
     /// Codepoint ranges to bake. Default is ASCII printable.
     /// Lifetime: borrowed; must outlive the decode call.
-    ranges: []const CodepointRange = &.{ .{ .first = 0x20, .last = 0x7F } },
+    ranges: []const CodepointRange = &.{.{ .first = 0x20, .last = 0x7F }},
 
     atlas_width: u32 = 512,
     atlas_height: u32 = 512,
@@ -325,7 +423,7 @@ pub const RenderTargetId = u32;
 /// consistency error (a backend with `createRenderTarget` but no
 /// `drawRenderTarget` can't composite) surfaced by `missingRenderTargetDecls`.
 pub const render_target_fn_decls = [_][]const u8{
-    "createRenderTarget", "beginRenderTarget", "endRenderTarget",
+    "createRenderTarget", "beginRenderTarget",   "endRenderTarget",
     "drawRenderTarget",   "destroyRenderTarget",
 };
 
@@ -1025,6 +1123,57 @@ pub fn Backend(comptime Impl: type) type {
             return Impl.uploadTexture(decoded);
         }
 
+        // ── Texture-sampling seam (labelle-core#71) ─────────────────────────
+        // OPTIONAL and `@hasDecl`-gated, mirroring the material / render-target
+        // seams. `uploadTextureFiltered` is NOT a required decl, so a backend
+        // without it is still a valid backend — the wrappers below degrade to
+        // the unfiltered call, i.e. the backend's own default sampling. Nothing
+        // here changes what an existing caller does: `uploadTexture` /
+        // `loadTextureFromMemory` above are untouched and still dispatch
+        // straight to `Impl`, so a backend that keeps its own module-level
+        // filter state (labelle-bgfx's `setTextureFilter`) keeps honouring it.
+
+        /// True iff `Impl` implements the texture-filter seam. Runtime-callable
+        /// mirror of the comptime `hasTextureFilterSeam`, for a caller that
+        /// wants to warn-once when a game asks for point sampling a backend
+        /// cannot give it.
+        pub inline fn hasTextureFilter() bool {
+            return comptime hasTextureFilterSeam(Impl);
+        }
+
+        /// True if `Impl` advertises `filter`. Runtime mirror of the comptime
+        /// `textureFilterCapabilities`, sharing its single implementation, so
+        /// this answers `true` for exactly the filters in that manifest.
+        ///
+        /// `.linear` is ALWAYS true and never put to `Impl` — it is the plain
+        /// `uploadTexture` path, a required decl. Anything else needs the seam
+        /// and may be declined by the optional fine-grained
+        /// `Impl.textureFilterSupported`: two-level gating, like
+        /// `postPassSupported`.
+        pub inline fn textureFilterSupported(filter: TextureFilter) bool {
+            return advertisesTextureFilter(Impl, filter);
+        }
+
+        /// `uploadTexture` with an explicit sampling `filter`. Same threading
+        /// and pixel-buffer-ownership rules as `uploadTexture` (main/GL thread
+        /// only; the CALLER frees `decoded.pixels` on both the success and the
+        /// discard paths).
+        ///
+        /// Degrades to a plain `Impl.uploadTexture` when the backend has no
+        /// `uploadTextureFiltered` (or declines this filter): the texture still
+        /// uploads, just with the backend's default sampling — a quality
+        /// degradation, not a contract violation. For `.linear` that degrade is
+        /// not even a degradation: the plain path IS the linear path, which is
+        /// why `textureFilterSupported(.linear)` can promise `true` outright.
+        pub inline fn uploadTextureFiltered(decoded: DecodedImage, filter: TextureFilter) !Texture {
+            if (@hasDecl(Impl, "uploadTextureFiltered")) {
+                if (!@hasDecl(Impl, "textureFilterSupported") or Impl.textureFilterSupported(filter)) {
+                    return Impl.uploadTextureFiltered(decoded, filter);
+                }
+            }
+            return Impl.uploadTexture(decoded);
+        }
+
         /// Convenience wrapper: decode + upload + free in one call. Equivalent
         /// to the previous `loadTextureFromMemory` contract; preserved so
         /// existing synchronous callers (renderer, retained engine, single-
@@ -1049,6 +1198,42 @@ pub fn Backend(comptime Impl: type) type {
             const decoded = try Impl.decodeImage(file_type, data, allocator);
             defer allocator.free(decoded.pixels);
             return Impl.uploadTexture(decoded);
+        }
+
+        /// `loadTextureFromMemory` with an explicit sampling `filter` — the
+        /// synchronous convenience path's half of the texture-filter seam
+        /// (labelle-core#71). Decode + upload + free in one call, identical to
+        /// `loadTextureFromMemory` in every respect except that the upload goes
+        /// through `uploadTextureFiltered`.
+        ///
+        /// Passing `DEFAULT_TEXTURE_FILTER` is NOT identical to calling
+        /// `loadTextureFromMemory`, and deliberately so: the unfiltered wrapper
+        /// dispatches to `Impl.uploadTexture`, letting a backend apply whatever
+        /// default it keeps (labelle-bgfx's `setTextureFilter`), whereas this
+        /// one PINS the filter for that one texture. That is why
+        /// `loadTextureFromMemory` was left calling `Impl.uploadTexture`
+        /// directly rather than being re-expressed on top of this.
+        ///
+        /// GPU-compressed blobs still take the `uploadCompressed` fast path
+        /// unchanged: an ASTC upload has no filter parameter in the contract,
+        /// so its sampling stays the backend's own concern.
+        pub inline fn loadTextureFromMemoryFiltered(
+            file_type: [:0]const u8,
+            data: []const u8,
+            filter: TextureFilter,
+        ) !Texture {
+            comptime {
+                // Same paired-unit rule as `loadTextureFromMemory` above.
+                if (@hasDecl(Impl, "isCompressed") != @hasDecl(Impl, "uploadCompressed"))
+                    @compileError("Backend must define both 'isCompressed' and 'uploadCompressed', or neither");
+            }
+            if (@hasDecl(Impl, "isCompressed") and @hasDecl(Impl, "uploadCompressed")) {
+                if (Impl.isCompressed(data)) return Impl.uploadCompressed(data);
+            }
+            const allocator = decode_allocator;
+            const decoded = try Impl.decodeImage(file_type, data, allocator);
+            defer allocator.free(decoded.pixels);
+            return uploadTextureFiltered(decoded, filter);
         }
 
         pub inline fn unloadTexture(texture: Texture) void {

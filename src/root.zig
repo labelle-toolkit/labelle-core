@@ -137,6 +137,16 @@ pub const PostPassUniforms = backend_contract.PostPassUniforms;
 pub const PostPass = backend_contract.PostPass;
 pub const PostFxCapabilities = backend_contract.PostFxCapabilities;
 pub const postFxCapabilities = backend_contract.postFxCapabilities;
+// Texture-sampling seam (point/nearest filtering, labelle-core#71) — the value
+// type + its comptime capability introspection. The optional
+// `uploadTextureFiltered` / `loadTextureFromMemoryFiltered` /
+// `textureFilterSupported` decls live on `Backend(Impl)`; `uploadTextureFiltered`
+// is deliberately NOT a required decl, so backends without it are unaffected.
+pub const TextureFilter = backend_contract.TextureFilter;
+pub const DEFAULT_TEXTURE_FILTER = backend_contract.DEFAULT_TEXTURE_FILTER;
+pub const TextureFilterCapabilities = backend_contract.TextureFilterCapabilities;
+pub const textureFilterCapabilities = backend_contract.textureFilterCapabilities;
+pub const hasTextureFilterSeam = backend_contract.hasTextureFilterSeam;
 // Render-contract versions: the two named sub-surfaces + the composite.
 pub const DRAW_CONTRACT_VERSION = backend_contract.DRAW_CONTRACT_VERSION;
 pub const LOADER_CONTRACT_VERSION = backend_contract.LOADER_CONTRACT_VERSION;
@@ -235,7 +245,6 @@ pub fn EntityInfo(comptime Entity: type) type {
         entity_id: Entity,
     };
 }
-
 
 // Collect the inline `test` blocks in `src/*.zig` (labelle-core#68).
 //

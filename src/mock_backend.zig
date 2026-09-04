@@ -114,7 +114,17 @@ pub const MockBackend = struct {
         y: f32,
         size: f32,
         color: Color,
+        /// The font handle the draw carried (font seam, labelle-core#75).
+        /// `null` for a plain `drawText`, and also for a `drawTextWithFont`
+        /// whose caller had no font yet (still baking) — both mean "the
+        /// backend's built-in font", which is exactly the distinction a
+        /// renderer test wants to assert.
+        font: ?FontHandle = null,
     };
+
+    /// Opaque font handle carried by the optional font-aware text draw
+    /// (font seam, labelle-core#75), re-exported so tests can spell it.
+    pub const FontHandle = backend_mod.FontHandle;
 
     /// Blend mode for the optional `drawMesh` primitive (labelle-gfx#290),
     /// re-exported so tests can assert the recorded value.
@@ -523,6 +533,30 @@ pub const MockBackend = struct {
                 .y = y,
                 .size = size,
                 .color = tint,
+            }) catch {};
+        }
+    }
+
+    /// Optional font-aware text draw (font seam, labelle-core#75). The mock opts
+    /// into the seam by declaring this decl, so `Backend(MockBackend)` routes
+    /// font-carrying text here instead of degrading to `drawText`. Records the
+    /// same fields plus the handle, so a renderer test can assert the font
+    /// actually reached the backend rather than being dropped at the call.
+    pub fn drawTextWithFont(
+        _: [:0]const u8,
+        x: f32,
+        y: f32,
+        size: f32,
+        tint: Color,
+        font: ?FontHandle,
+    ) void {
+        if (allocator_ref) |alloc| {
+            text_calls_list.append(alloc, .{
+                .x = x,
+                .y = y,
+                .size = size,
+                .color = tint,
+                .font = font,
             }) catch {};
         }
     }

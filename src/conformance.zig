@@ -306,6 +306,27 @@ pub fn runRenderSuite(comptime Impl: type) !void {
         B.drawPolygon(&poly, B.white);
         B.drawLine(0, 0, 10, 10, 1, B.white);
         B.drawText("hi", 0, 0, 12, B.white);
+
+        // Optional font-aware text draw (font seam, labelle-core#75). The
+        // `Backend(Impl)` wrapper is TOTAL — a backend without the decl degrades
+        // to the plain `drawText` above — so calling it is safe for EVERY
+        // backend. Both shapes are exercised on purpose:
+        //   * `null`  — "no font yet" (a lazily-declared font is still baking,
+        //     `Game.fontId` returns null). A backend that declares the decl must
+        //     render this exactly like `drawText`, i.e. built-in font, no crash.
+        //   * a handle — the pop-in path. SHAPE-ONLY host-side: we cannot assert
+        //     glyphs without a GPU, only that the call links and survives a
+        //     handle the backend has never seen.
+        B.drawTextWithFont("hi", 0, 0, 12, B.white, null);
+        B.drawTextWithFont("hi", 0, 0, 12, B.white, 1);
+        // The whole-seam gate must agree with the decl it gates on — a probe
+        // that lies here is how a renderer picks the wrong path (the class of
+        // bug `ownsLoop`/`canScreenshot` are checked for above).
+        try testing.expectEqual(
+            @hasDecl(Impl, "drawTextWithFont"),
+            backend_contract.hasFontAwareText(Impl),
+        );
+
         B.drawRectangleLinesEx(rect, 1, B.white);
         B.drawCircleLines(0, 0, 5, B.white);
 

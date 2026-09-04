@@ -147,6 +147,12 @@ pub const DEFAULT_TEXTURE_FILTER = backend_contract.DEFAULT_TEXTURE_FILTER;
 pub const TextureFilterCapabilities = backend_contract.TextureFilterCapabilities;
 pub const textureFilterCapabilities = backend_contract.textureFilterCapabilities;
 pub const hasTextureFilterSeam = backend_contract.hasTextureFilterSeam;
+// Font-aware text seam (labelle-core#75; labelle-gfx#348/#349, labelle-engine#845) — the handle
+// type + its whole-seam capability gate. The optional `drawTextWithFont` decl
+// lives on `Backend(Impl)`; it is NOT a required decl, so a backend without it
+// keeps rendering text in its built-in font via the plain `drawText`.
+pub const FontHandle = backend_contract.FontHandle;
+pub const hasFontAwareText = backend_contract.hasFontAwareText;
 // Render-contract versions: the two named sub-surfaces + the composite.
 pub const DRAW_CONTRACT_VERSION = backend_contract.DRAW_CONTRACT_VERSION;
 pub const LOADER_CONTRACT_VERSION = backend_contract.LOADER_CONTRACT_VERSION;

@@ -3217,3 +3217,142 @@ test "texture ids: the two spaces are nominally distinct" {
     try std.testing.expectEqual(u32, @typeInfo(TextureId).@"enum".tag_type);
     try std.testing.expectEqual(u32, @typeInfo(BackendTextureId).@"enum".tag_type);
 }
+
+// ── Font-aware text seam (labelle-core#75; labelle-gfx#348/#349, labelle-engine#845) ──────────
+//
+// End to end this was broken: a game could load a font, `Game.setTextFont`
+// could stamp its id on a `Text`, labelle-gfx could carry it into the retained
+// text table — and then the renderer had to drop it, because the only text decl
+// in this contract (`drawText`, REQUIRED) takes no font. `drawTextWithFont` is
+// the seam that lets it through. It is OPTIONAL, so both backend shapes must
+// work: one that declares it (the font arrives) and one that does not (every
+// text draw degrades to the plain built-in-font `drawText`, unchanged).
+
+/// A minimal, conformant render backend that does NOT declare
+/// `drawTextWithFont` — i.e. every backend shipping today. Records its
+/// `drawText` calls so a test can prove the wrapper degraded to them.
+const NoFontTextBackend = struct {
+    const RGBA = struct { r: u8 = 0, g: u8 = 0, b: u8 = 0, a: u8 = 0 };
+
+    pub const Texture = struct {};
+    pub const Color = RGBA;
+    pub const Rectangle = struct {};
+    pub const Vector2 = struct {};
+    pub const Camera2D = struct {};
+
+    pub const white: RGBA = .{};
+    pub const black: RGBA = .{};
+    pub const red: RGBA = .{};
+    pub const green: RGBA = .{};
+    pub const blue: RGBA = .{};
+    pub const transparent: RGBA = .{};
+
+    threadlocal var plain_text_calls: u32 = 0;
+
+    pub fn resetCounts() void {
+        plain_text_calls = 0;
+    }
+
+    pub fn plainTextCallCount() u32 {
+        return plain_text_calls;
+    }
+
+    pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: RGBA) void {}
+    pub fn drawRectangleRec(_: Rectangle, _: RGBA) void {}
+    pub fn drawCircle(_: f32, _: f32, _: f32, _: RGBA) void {}
+    pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: RGBA) void {}
+    pub fn drawPolygon(_: []const Vector2, _: RGBA) void {}
+    pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: RGBA) void {}
+    pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: RGBA) void {
+        plain_text_calls += 1;
+    }
+    pub fn beginMode2D(_: Camera2D) void {}
+    pub fn endMode2D() void {}
+    pub fn getScreenWidth() i32 {
+        return 0;
+    }
+    pub fn getScreenHeight() i32 {
+        return 0;
+    }
+    pub fn screenToWorld(p: Vector2, _: Camera2D) Vector2 {
+        return p;
+    }
+    pub fn worldToScreen(p: Vector2, _: Camera2D) Vector2 {
+        return p;
+    }
+    pub fn setDesignSize(_: i32, _: i32) void {}
+    pub fn loadTexture(_: [:0]const u8) !Texture {
+        return .{};
+    }
+    pub fn decodeImage(_: [:0]const u8, _: []const u8, _: std.mem.Allocator) !root.DecodedImage {
+        return error.UnsupportedImageFormat;
+    }
+    pub fn uploadTexture(_: root.DecodedImage) !Texture {
+        return .{};
+    }
+    pub fn unloadTexture(_: Texture) void {}
+};
+
+test "font seam: a backend without drawTextWithFont is still conformant" {
+    // The whole point of making the decl optional: nothing existing breaks.
+    try testing.expectEqual(@as(usize, 0), comptime missingBackendDecls(NoFontTextBackend).len);
+    try testing.expect(!comptime root.hasFontAwareText(NoFontTextBackend));
+    // ...and the addition is not in the required draw set, which is why
+    // DRAW_CONTRACT_VERSION does not bump.
+    inline for (root.draw_fn_decls) |name| {
+        try testing.expect(!std.mem.eql(u8, name, "drawTextWithFont"));
+    }
+    try testing.expectEqual(@as(u32, 1), root.DRAW_CONTRACT_VERSION);
+}
+
+test "font seam: without the decl, a font-carrying draw degrades to plain drawText" {
+    const B = Backend(NoFontTextBackend);
+    NoFontTextBackend.resetCounts();
+
+    // Both a real handle and "no font yet" land on the required decl — the
+    // backend renders its built-in font, exactly as before this seam existed.
+    B.drawTextWithFont("hi", 1, 2, 12, NoFontTextBackend.white, 7);
+    B.drawTextWithFont("hi", 1, 2, 12, NoFontTextBackend.white, null);
+    try testing.expectEqual(@as(u32, 2), NoFontTextBackend.plainTextCallCount());
+}
+
+test "font seam: with the decl, the font handle reaches the backend" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    try testing.expect(comptime root.hasFontAwareText(MockBackend));
+
+    B.drawTextWithFont("hi", 1, 2, 12, MockBackend.white, 7);
+    const calls = MockBackend.getTextCalls();
+    try testing.expectEqual(@as(usize, 1), calls.len);
+    // The handle is transported verbatim — this is the assertion that was
+    // impossible before: the font used to die at the `drawText` call.
+    try testing.expectEqual(@as(?root.FontHandle, 7), calls[0].font);
+}
+
+test "font seam: null means built-in font and is forwarded, not swallowed" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+
+    // `Game.fontId` returns null while a lazily-declared font is still baking.
+    // The backend owns that fallback, so the wrapper forwards the null rather
+    // than deciding for it.
+    B.drawTextWithFont("hi", 0, 0, 12, MockBackend.white, null);
+    // A plain `drawText` records the same "no font" shape.
+    B.drawText("hi", 0, 0, 12, MockBackend.white);
+
+    const calls = MockBackend.getTextCalls();
+    try testing.expectEqual(@as(usize, 2), calls.len);
+    try testing.expectEqual(@as(?root.FontHandle, null), calls[0].font);
+    try testing.expectEqual(@as(?root.FontHandle, null), calls[1].font);
+}
+
+test "font seam: FontHandle is the straight-through opaque handle shape" {
+    // Same convention as `RenderTargetId` — no core-owned font registry to
+    // resolve through, so the contract only transports whatever id its caller
+    // minted. `null`, not 0, is how "no font" is spelled.
+    try testing.expectEqual(u32, root.FontHandle);
+    try testing.expectEqual(u32, root.RenderTargetId);
+}

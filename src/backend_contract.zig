@@ -141,6 +141,38 @@ pub fn hasTextureFilterSeam(comptime Impl: type) bool {
     return comptime @hasDecl(Impl, "uploadTextureFiltered");
 }
 
+// ── Font-aware text seam (labelle-core#75; labelle-gfx#348/#349, labelle-engine#845) ──────────
+// The required `drawText` decl carries no font, so a baked font atlas could be
+// loaded, handed an id, and stored on a `Text` visual — and still never reach
+// the screen: the renderer had to drop the id at the backend call. This seam is
+// the missing link. Purely ADDITIVE and `@hasDecl`-gated, exactly like
+// `drawMesh` / `drawTextureProMaterial` / `uploadTextureFiltered`, so
+// `DRAW_CONTRACT_VERSION` does NOT bump and no existing backend is rejected.
+
+/// An opaque font handle as it crosses the draw contract — the value a renderer
+/// stores on a text visual and hands back to the backend at draw time.
+///
+/// Plain `u32`, the same straight-through opaque-handle convention as
+/// `RenderTargetId` (no catalog mapping at this seam). `0` is reserved and MUST
+/// NOT be passed as a handle: "no font" is spelled `null`, not `0`, so the
+/// built-in-font fallback is one unambiguous shape at every layer.
+///
+/// Deliberately NOT a distinct enum like `TextureId`/`BackendTextureId`: unlike
+/// textures there is no core-owned font registry to resolve through — the
+/// numbering space belongs to whoever minted it (labelle-gfx's `FontId`,
+/// labelle-engine's `FontId` via the assembler adapter), and this contract only
+/// transports it.
+pub const FontHandle = u32;
+
+/// True iff `Impl` implements the optional font-aware text draw (i.e. declares
+/// `drawTextWithFont`). Whole-seam gate, mirroring `hasTextureFilterSeam` /
+/// `hasRenderTargetSubSurface`; false ⇒ every text draw goes through the plain
+/// required `drawText` and renders in the backend's built-in font (a quality
+/// degradation, never a contract violation).
+pub fn hasFontAwareText(comptime Impl: type) bool {
+    return comptime @hasDecl(Impl, "drawTextWithFont");
+}
+
 /// Codepoint range to bake glyphs for, half-open [first, last).
 /// Used by `FontBakeParams` to drive `decodeFont`. Phase 4 of the Asset
 /// Streaming RFC (labelle-engine#448).
@@ -557,6 +589,13 @@ pub fn postFxCapabilities(comptime Impl: type) PostFxCapabilities {
 /// (`drawTexturePro`/`drawRectangleRec`/`drawCircle`/`drawTriangle`/
 /// `drawPolygon`/`drawLine`/`drawText`/`beginMode2D`/… — see `draw_fn_decls`).
 /// Bump on any breaking change to that decl set or their signatures.
+///
+/// NOT bumped by the optional font-aware `drawTextWithFont` (labelle-core#75):
+/// it is an ADDITION to `Backend(Impl)`, `@hasDecl`-gated and absent from
+/// `draw_fn_decls`, so every existing backend still satisfies the required set
+/// unchanged and `drawText`'s signature is untouched. Same reasoning that kept
+/// this at 1 for `drawMesh` / `drawTextureProMaterial` / `uploadTextureFiltered`
+/// — see the rule stated in the block comment above.
 pub const DRAW_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the **asset-loader** sub-surface — the image + font
@@ -1096,6 +1135,41 @@ pub fn Backend(comptime Impl: type) type {
 
         pub inline fn drawText(text: [:0]const u8, x: f32, y: f32, size: f32, tint: Color) void {
             Impl.drawText(text, x, y, size, tint);
+        }
+
+        /// Font-aware text draw (font seam, labelle-core#75). Identical to
+        /// `drawText` but carries the `FontHandle` the caller wants the string
+        /// rendered with.
+        ///
+        /// OPTIONAL, mirroring `drawMesh` / `drawTextureProMaterial`: a backend
+        /// opts in by declaring `pub fn drawTextWithFont(text, x, y, size, tint,
+        /// font: ?FontHandle)`. Adding it is non-breaking, so
+        /// `DRAW_CONTRACT_VERSION` does NOT bump — a backend that omits it stays
+        /// conformant and every text draw degrades to the plain `drawText`
+        /// (built-in font — a quality degradation, NOT a contract violation).
+        ///
+        /// `font` is an OPTIONAL on purpose, and `null` means "use the built-in
+        /// font" — the same shape as `Gui.labelWidgetWithFont`'s `?FontId` and
+        /// as `Game.fontId`, which returns `null` while a lazily-declared font
+        /// is still baking. A backend implementing this decl MUST therefore
+        /// handle `null` by rendering exactly what `drawText` would: a streaming
+        /// font shows the built-in glyphs for a frame or two, then pops in.
+        /// `null` is forwarded rather than short-circuited so the backend owns
+        /// that fallback in one place (and can, say, keep its own last-resort
+        /// atlas hot).
+        pub inline fn drawTextWithFont(
+            text: [:0]const u8,
+            x: f32,
+            y: f32,
+            size: f32,
+            tint: Color,
+            font: ?FontHandle,
+        ) void {
+            if (@hasDecl(Impl, "drawTextWithFont")) {
+                Impl.drawTextWithFont(text, x, y, size, tint, font);
+            } else {
+                drawText(text, x, y, size, tint);
+            }
         }
 
         pub inline fn loadTexture(path: [:0]const u8) !Texture {

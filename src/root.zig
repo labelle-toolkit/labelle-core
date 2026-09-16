@@ -169,6 +169,7 @@ pub const MockBackend = mock_backend.MockBackend;
 pub const VideoInterface = video.VideoInterface;
 pub const StubVideo = video.StubVideo;
 pub const VideoComponent = video.VideoComponent;
+pub const VIDEO_MAX_OPEN_ATTEMPTS = video.MAX_OPEN_ATTEMPTS;
 pub const VideoFit = video.VideoFit;
 
 pub const LogLevel = log.LogLevel;

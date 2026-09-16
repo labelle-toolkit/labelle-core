@@ -109,6 +109,13 @@ pub const VideoFit = enum(u8) {
 /// every call is a no-op (matches a backend without video).
 pub const StubVideo = struct {};
 
+/// How many consecutive failed opens the video system tolerates before it
+/// gives up on a `VideoComponent` and finishes it. Small: the legitimate
+/// reason to retry (a backend that is not ready in the first frames) resolves
+/// within a handful of frames, while a decoder that cannot open the clip at
+/// all never will. See `VideoComponent.open_attempts`.
+pub const MAX_OPEN_ATTEMPTS: u8 = 30;
+
 /// Prefab-placeable video: attach to an entity and the engine's video system
 /// plays the clip at that entity's world position — so a project can author
 /// multiple videos in multiple places (in-world screens, billboards) purely via
@@ -122,6 +129,18 @@ pub const VideoComponent = struct {
     path: []const u8 = "",
     /// Runtime player handle (0 = not opened yet). System-managed.
     handle: u32 = 0,
+    /// How many times the engine has tried and failed to open `path`.
+    /// System-managed, not authored.
+    ///
+    /// Opening can fail for a frame or two for legitimate reasons (on Android
+    /// the asset manager is not reachable until the activity is up), so the
+    /// video system retries — but it must not retry FOREVER. A device whose
+    /// decoder can never open the clip would otherwise re-create a decoder
+    /// every frame and never finish, so a play-once intro hangs the boot on a
+    /// blank screen (seen on a MediaTek tablet: 359 decoder creations in 21 s
+    /// at 40 % CPU, labelle-engine#874). The system gives up at
+    /// `MAX_OPEN_ATTEMPTS` and finishes the video instead.
+    open_attempts: u8 = 0,
     /// Draw size in the entity's coordinate space; the dest rect is anchored at
     /// the entity's Position. 0 means "use the video's native pixel size".
     /// Ignored when `fullscreen` is set.
@@ -139,6 +158,10 @@ pub const VideoComponent = struct {
     loop: bool = true,
     /// Set by the video system once a play-once clip has ended, so the finished
     /// event fires exactly once. Not authored — leave default in prefabs.
+    ///
+    /// Also set when the clip could not be OPENED (see `open_attempts`): a
+    /// consumer waiting for the end of a video must be released whether the
+    /// video played or never started, or it waits forever.
     finished: bool = false,
     /// Skip drawing without closing the player (e.g. off-screen culling).
     visible: bool = true,
@@ -184,6 +207,7 @@ test "VideoComponent: holds a JSON-friendly path" {
     try std.testing.expect(!c.fullscreen);
     try std.testing.expectEqual(VideoFit.cover, c.fit); // default fit
     try std.testing.expect(c.loop and !c.finished); // loops by default
+    try std.testing.expectEqual(@as(u8, 0), c.open_attempts); // no open tried yet
     // intro() is a play-once full-screen clip.
     const it = VideoComponent.intro("opening");
     try std.testing.expect(it.fullscreen and !it.loop);

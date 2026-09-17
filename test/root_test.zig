@@ -2409,12 +2409,13 @@ test "Backend: a `.none` material always takes the plain draw path" {
 }
 
 test "materialCapabilities: reports the mock's advertised effects; empty for a materialless backend" {
-    // The mock advertises exactly flash + palette_swap (order = MaterialEffect
-    // enum order, minus `none`).
+    // The mock advertises exactly flash + palette_swap + pixel_water (order =
+    // MaterialEffect enum order, minus `none`).
     const caps = comptime root.materialCapabilities(MockBackend);
-    try testing.expectEqual(@as(usize, 2), caps.effects.len);
+    try testing.expectEqual(@as(usize, 3), caps.effects.len);
     try testing.expectEqual(root.MaterialEffect.palette_swap, caps.effects[0]);
     try testing.expectEqual(root.MaterialEffect.flash, caps.effects[1]);
+    try testing.expectEqual(root.MaterialEffect.pixel_water, caps.effects[2]);
 
     // A backend without `drawTextureProMaterial` advertises nothing, and the
     // wrapper compiles to a pure `drawTexturePro` degrade (zero cost).
@@ -2488,6 +2489,108 @@ test "materialCapabilities: reports the mock's advertised effects; empty for a m
     // Every material degrades to a plain draw; compiles + runs at zero cost.
     B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{ .effect = .flash });
     try testing.expectEqual(@as(usize, 1), NoMaterial.draws);
+
+    // …including `pixel_water`, whose own optional decl is absent too.
+    try testing.expect(!B.materialSupported(.pixel_water));
+    B.drawTextureProPixelWater(tex, rect, rect, origin, 0, B.white, .{});
+    try testing.expectEqual(@as(usize, 2), NoMaterial.draws);
+}
+
+// ── Pixel-water sub-surface (COND-07, labelle-bgfx#100) ─────────────────────
+
+test "pixel_water: NOT implied by drawTextureProMaterial — it needs its own decl" {
+    // The regression this guards: `materialCapabilities`' default is "declared
+    // the material decl ⇒ supports every built-in". Appending `pixel_water` to
+    // `MaterialEffect` would silently make every backend written before this
+    // sub-surface existed advertise water it cannot draw. `materialCapabilities`
+    // is pure `@hasDecl` introspection, so a decl-shaped stub is the exact probe.
+    const MaterialOnly = struct {
+        pub fn drawTextureProMaterial() void {}
+    };
+    const caps = comptime root.materialCapabilities(MaterialOnly);
+    // All four shipped effects, and NOT pixel_water.
+    try testing.expectEqual(@as(usize, 4), caps.effects.len);
+    for (caps.effects) |eff| try testing.expect(eff != .pixel_water);
+
+    // A backend that adds ONLY the water decl advertises only water — the two
+    // families gate independently.
+    const WaterOnly = struct {
+        pub fn drawTextureProPixelWater() void {}
+    };
+    const water_caps = comptime root.materialCapabilities(WaterOnly);
+    try testing.expectEqual(@as(usize, 1), water_caps.effects.len);
+    try testing.expectEqual(root.MaterialEffect.pixel_water, water_caps.effects[0]);
+
+    // Neither decl → nothing, unchanged.
+    const Neither = struct {};
+    try testing.expectEqual(@as(usize, 0), comptime root.materialCapabilities(Neither).effects.len);
+}
+
+test "pixel_water: the mock records the whole resolved payload, not a plain draw" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+    try testing.expect(B.materialSupported(.pixel_water));
+
+    const tex = try B.loadTexture("condenser.png");
+    const rect = MockBackend.Rectangle{ .x = 0, .y = 0, .width = 96, .height = 18 };
+    const origin = MockBackend.Vector2{ .x = 0, .y = 0 };
+    var water = root.PixelWaterDraw{
+        .mask_texture = 7,
+        .reflection_texture = 9,
+        .logical_width = 96,
+        .logical_height = 18,
+        .grid_pixels = 1,
+        .ripple_count = 2,
+        .flags = root.PIXEL_WATER_FLAG_WAVES,
+        .level = 0.35,
+        .time = 1.25,
+        .deep = .{ .r = 0.09, .g = 0.18, .b = 0.21, .a = 1 },
+        .wave_amplitude_pixels = 1,
+        .wave_period_seconds = 3,
+        .ripple_duration_seconds = 0.8,
+        .ripple_radius_pixels = 6,
+        .ripple_strength_pixels = 1,
+    };
+    water.ripples[0] = .{ .x = 12, .start_time = 1.0, .strength = 1 };
+    water.ripples[1] = .{ .x = 40, .start_time = 1.2, .strength = 0.5 };
+
+    B.drawTextureProPixelWater(tex, rect, rect, origin, 0, B.white, water);
+
+    // The water path ran — NOT the degrade path (which would land in drawCalls).
+    try testing.expectEqual(@as(usize, 1), MockBackend.getPixelWaterCallCount());
+    try testing.expectEqual(@as(usize, 0), MockBackend.getDrawCallCount());
+
+    const call = MockBackend.getPixelWaterCalls()[0];
+    try testing.expectEqual(tex.id, call.texture_id);
+    try testing.expectEqual(@as(u32, 7), call.water.mask_texture);
+    try testing.expectEqual(@as(u32, 9), call.water.reflection_texture);
+    try testing.expectEqual(@as(f32, 0.35), call.water.level);
+    try testing.expectEqual(@as(f32, 1.25), call.water.time);
+    try testing.expectEqual(@as(u32, 2), call.water.ripple_count);
+    try testing.expectEqual(@as(f32, 12), call.water.ripples[0].x);
+    try testing.expectEqual(@as(f32, 0.5), call.water.ripples[1].strength);
+    // Entries at/past ripple_count are ignored, not required to be zeroed.
+    try testing.expect(call.water.flags & root.PIXEL_WATER_FLAG_WAVES != 0);
+}
+
+test "pixel_water: MaterialUniforms and the four shipped effects are byte-identical" {
+    // Adding the water sub-surface must not move a byte of the inline block that
+    // EVERY sprite carries, nor renumber a shipped effect tag.
+    try testing.expectEqual(@as(usize, 32), @sizeOf(root.MaterialUniforms));
+    try testing.expectEqual(@as(u8, 0), @intFromEnum(root.MaterialEffect.none));
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(root.MaterialEffect.palette_swap));
+    try testing.expectEqual(@as(u8, 2), @intFromEnum(root.MaterialEffect.flash));
+    try testing.expectEqual(@as(u8, 3), @intFromEnum(root.MaterialEffect.dissolve));
+    try testing.expectEqual(@as(u8, 4), @intFromEnum(root.MaterialEffect.outline));
+    try testing.expectEqual(@as(u8, 5), @intFromEnum(root.MaterialEffect.pixel_water));
+
+    // The water payload's own locked layout: 16 vec4s, u32 header first, so a
+    // backend maps it onto uniform registers without repacking.
+    try testing.expectEqual(@as(usize, 256), @sizeOf(root.PixelWaterDraw));
+    try testing.expectEqual(@as(usize, 16), @sizeOf(root.PixelWaterRipple));
+    try testing.expectEqual(@as(usize, 128), @offsetOf(root.PixelWaterDraw, "ripples"));
+    try testing.expectEqual(@as(usize, 8), root.PIXEL_WATER_MAX_RIPPLES);
 }
 
 // ── Render-target sub-surface + post-fx seam (labelle-gfx#305, RFC §2) ───────

@@ -147,6 +147,12 @@ pub const MockBackend = struct {
     pub const MaterialEffect = backend_mod.MaterialEffect;
     pub const MaterialUniforms = backend_mod.MaterialUniforms;
 
+    /// Pixel-water value types (COND-07, labelle-bgfx#100), re-exported so tests
+    /// can assert the resolved payload the renderer forwarded.
+    pub const PixelWaterDraw = backend_mod.PixelWaterDraw;
+    pub const PixelWaterRipple = backend_mod.PixelWaterRipple;
+    pub const PixelWaterRgba = backend_mod.PixelWaterRgba;
+
     /// One `drawTextureProMaterial` call. Records the texture, destination,
     /// tint, and the full `Material` (effect + uniforms) so a test can assert
     /// the renderer forwarded the exact effect + uniform block.
@@ -155,6 +161,17 @@ pub const MockBackend = struct {
         dest: Rectangle,
         tint: Color,
         material: Material,
+    };
+
+    /// One `drawTextureProPixelWater` call. Records the sprite texture, dest,
+    /// tint and the WHOLE resolved `PixelWaterDraw`, so a test can assert the
+    /// level/time/ripple payload gfx computed — including that a time-only
+    /// change still reached the backend with the transform unchanged.
+    pub const PixelWaterCall = struct {
+        texture_id: u32,
+        dest: Rectangle,
+        tint: Color,
+        water: PixelWaterDraw,
     };
 
     /// Post-fx value types for the full-screen pass-stack seam (labelle-gfx#305),
@@ -191,6 +208,7 @@ pub const MockBackend = struct {
     threadlocal var text_calls_list: std.ArrayListUnmanaged(TextCall) = .empty;
     threadlocal var mesh_calls_list: std.ArrayListUnmanaged(MeshCall) = .empty;
     threadlocal var material_calls_list: std.ArrayListUnmanaged(MaterialCall) = .empty;
+    threadlocal var pixel_water_calls_list: std.ArrayListUnmanaged(PixelWaterCall) = .empty;
     threadlocal var allocator_ref: ?std.mem.Allocator = null;
     threadlocal var screen_width_val: i32 = 800;
     threadlocal var screen_height_val: i32 = 600;
@@ -247,6 +265,7 @@ pub const MockBackend = struct {
         text_calls_list = .empty;
         mesh_calls_list = .empty;
         material_calls_list = .empty;
+        pixel_water_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
         render_target_calls_list = .empty;
@@ -273,6 +292,7 @@ pub const MockBackend = struct {
             text_calls_list.deinit(alloc);
             mesh_calls_list.deinit(alloc);
             material_calls_list.deinit(alloc);
+            pixel_water_calls_list.deinit(alloc);
             camera_passes_list.deinit(alloc);
             viewport_calls_list.deinit(alloc);
             render_target_calls_list.deinit(alloc);
@@ -287,6 +307,7 @@ pub const MockBackend = struct {
         text_calls_list = .empty;
         mesh_calls_list = .empty;
         material_calls_list = .empty;
+        pixel_water_calls_list = .empty;
         camera_passes_list = .empty;
         viewport_calls_list = .empty;
         render_target_calls_list = .empty;
@@ -304,6 +325,7 @@ pub const MockBackend = struct {
         text_calls_list.clearRetainingCapacity();
         mesh_calls_list.clearRetainingCapacity();
         material_calls_list.clearRetainingCapacity();
+        pixel_water_calls_list.clearRetainingCapacity();
         camera_passes_list.clearRetainingCapacity();
         viewport_calls_list.clearRetainingCapacity();
         render_target_calls_list.clearRetainingCapacity();
@@ -408,6 +430,19 @@ pub const MockBackend = struct {
 
     pub fn getMaterialCallCount() usize {
         return material_calls_list.items.len;
+    }
+
+    /// Pixel-water draw calls recorded since the last reset — one per
+    /// `drawTextureProPixelWater` the mock actually executed. A degraded water
+    /// sprite (unsupported capability, or the authored static fallback) takes
+    /// `drawTexturePro` and lands in `getDrawCalls` instead, which is how a test
+    /// tells the real effect from its fallback apart.
+    pub fn getPixelWaterCalls() []const PixelWaterCall {
+        return pixel_water_calls_list.items;
+    }
+
+    pub fn getPixelWaterCallCount() usize {
+        return pixel_water_calls_list.items.len;
     }
 
     /// Render targets created since the last reset — one per `createRenderTarget`.
@@ -607,13 +642,36 @@ pub const MockBackend = struct {
         }
     }
 
+    /// Optional pixel-water draw (COND-07, labelle-bgfx#100). The mock opts into
+    /// the water sub-surface so gfx/engine tests can assert the resolved payload
+    /// deterministically, with no GPU. Reached only when
+    /// `materialSupported(.pixel_water)` is true.
+    pub fn drawTextureProPixelWater(
+        texture: Texture,
+        _: Rectangle,
+        dest: Rectangle,
+        _: Vector2,
+        _: f32,
+        tint: Color,
+        water: PixelWaterDraw,
+    ) void {
+        if (allocator_ref) |alloc| {
+            pixel_water_calls_list.append(alloc, .{
+                .texture_id = texture.id,
+                .dest = dest,
+                .tint = tint,
+                .water = water,
+            }) catch {};
+        }
+    }
+
     /// Fine-grained effect capability (labelle-gfx#305). The mock advertises
-    /// `flash` + `palette_swap` and declines `dissolve` + `outline`, so the
-    /// renderer's degrade branch + warn-once are testable against a single
-    /// backend. `none` is never a material effect.
+    /// `flash` + `palette_swap` + `pixel_water` and declines `dissolve` +
+    /// `outline`, so the renderer's degrade branch + warn-once are testable
+    /// against a single backend. `none` is never a material effect.
     pub fn materialSupported(effect: MaterialEffect) bool {
         return switch (effect) {
-            .flash, .palette_swap => true,
+            .flash, .palette_swap, .pixel_water => true,
             .dissolve, .outline, .none => false,
         };
     }

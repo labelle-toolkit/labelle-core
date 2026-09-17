@@ -301,6 +301,11 @@ pub const MaterialEffect = enum(u8) {
     flash,
     dissolve,
     outline,
+    /// Built-in reactive pixel water (COND-07, labelle-bgfx#100). Appended, so
+    /// the four shipped tags keep their values. UNLIKE the others, declaring
+    /// `drawTextureProMaterial` does NOT imply support — see
+    /// `materialCapabilities` and the pixel-water sub-surface below.
+    pixel_water,
 };
 
 /// Per-effect uniform block — a FLAT `extern struct` (decided: NOT an
@@ -365,15 +370,179 @@ pub const MaterialCapabilities = struct { effects: []const MaterialEffect };
 /// (a missing material is never a contract violation).
 pub fn materialCapabilities(comptime Impl: type) MaterialCapabilities {
     comptime {
-        if (!@hasDecl(Impl, "drawTextureProMaterial")) return .{ .effects = &.{} };
+        const has_material = @hasDecl(Impl, "drawTextureProMaterial");
+        const has_water = @hasDecl(Impl, pixel_water_fn_decl);
+        if (!has_material and !has_water) return .{ .effects = &.{} };
         var effects: []const MaterialEffect = &.{};
         for (std.enums.values(MaterialEffect)) |eff| {
             if (eff == .none) continue;
+            // `pixel_water` rides its own draw decl (its payload does not fit
+            // `MaterialUniforms`), so the "declared the material decl ⇒ supports
+            // every built-in" default must NOT cover it: every backend written
+            // before the water sub-surface existed would otherwise start
+            // advertising an effect it cannot draw.
+            if (eff == .pixel_water) {
+                if (!has_water) continue;
+            } else if (!has_material) continue;
             if (@hasDecl(Impl, "materialSupported") and !Impl.materialSupported(eff)) continue;
             effects = effects ++ [_]MaterialEffect{eff};
         }
         return .{ .effects = effects };
     }
+}
+
+// ── Pixel-water sub-surface (COND-07, labelle-bgfx#100 / RFC-PIXEL-WATER) ────
+// `pixel_water` is a curated built-in effect like the other four, but its
+// per-instance state (three colour ramps, wave/ripple tuning, and up to eight
+// live impacts) is 8x the 32-byte `MaterialUniforms` block. Cramming it into
+// the block every ordinary sprite carries inline on `SpriteVisual` would make
+// `.none` sprites pay for water, so the payload rides its OWN optional draw decl
+// (`drawTextureProPixelWater`) taking a `PixelWaterDraw` BY VALUE. `MaterialUniforms`
+// is untouched, every existing effect's layout is byte-identical, and no pointer
+// or generational handle crosses the marshal seam — the value is a flat, locked
+// `extern struct`, the same reinterpret-safe shape as `MaterialUniforms`/`PostPass`.
+//
+// Capability identity is `MaterialEffect.pixel_water`, so the renderer's
+// warn-once table, the provider manifest `.capabilities` mirror and the
+// negotiation path all work unchanged. It is the ONE effect whose support is NOT
+// implied by declaring `drawTextureProMaterial`: it additionally requires the
+// water decl (see `materialCapabilities`), so every backend that predates this
+// block keeps compiling and correctly reports `pixel_water` unsupported.
+
+/// The decl a backend adds to opt into the pixel-water sub-surface. Named so
+/// `materialCapabilities` and `Backend(Impl).materialSupported` agree on one
+/// spelling.
+pub const pixel_water_fn_decl = "drawTextureProPixelWater";
+
+/// Hard cap on simultaneously-live drop impacts per reservoir. Fixed (not a
+/// slice) so `PixelWaterDraw` stays a flat by-value `extern struct`: no pointer
+/// lifetime to reason about at the seam, and the shader's ripple loop has a
+/// comptime trip count on ESSL 3.00 / WebGL2, where dynamic loop bounds are a
+/// portability hazard. The CPU side expires old impacts and, at capacity,
+/// replaces the oldest deterministically.
+pub const PIXEL_WATER_MAX_RIPPLES: usize = 8;
+
+/// `PixelWaterDraw.flags` bit 0 — surface waves enabled. Lets a game (or the
+/// example's review panel) toggle waves without destroying the authored
+/// `wave_amplitude_pixels`, which a zero-amplitude toggle would.
+pub const PIXEL_WATER_FLAG_WAVES: u32 = 1 << 0;
+
+/// One live drop impact. `vec4`-shaped so the backend can upload the whole
+/// `ripples` array as `PIXEL_WATER_MAX_RIPPLES` consecutive `vec4`s.
+pub const PixelWaterRipple = extern struct {
+    /// Impact position along the reservoir's local +X, in native art pixels,
+    /// origin at the reservoir rectangle's top-left. The surface defines y, so
+    /// a ripple stays attached to a rising surface (RFC §"Runtime state").
+    x: f32 = 0,
+    /// Simulation time (NOT wall clock) at which the impact happened, in the
+    /// same timebase as `PixelWaterDraw.time`. Age = `time - start_time`; an age
+    /// outside `[0, ripple_duration_seconds)` contributes nothing.
+    start_time: f32 = 0,
+    /// Impact magnitude, 0..1, scaling `ripple_strength_pixels`.
+    strength: f32 = 0,
+    _reserved: f32 = 0,
+};
+
+/// A linear 0..1 RGBA colour ramp entry. Separate from the byte-per-channel
+/// `Color`: these are shader inputs, already converted out of the authored sRGB
+/// hex by the engine's existing colour pipeline (convert ONCE — see the RFC's
+/// double-gamma warning).
+pub const PixelWaterRgba = extern struct {
+    r: f32 = 0,
+    g: f32 = 0,
+    b: f32 = 0,
+    a: f32 = 0,
+};
+
+/// The complete resolved per-draw pixel-water payload: everything the shader
+/// needs for one reservoir, with nothing left to look up. Texture references are
+/// already-resolved backend-native handles (`0` = none), matching
+/// `MaterialUniforms.aux_texture`'s convention; the asset manager keeps
+/// ownership, so releasing a water instance must NEVER destroy them.
+///
+/// Laid out as 16 `vec4`s (256 bytes), u32 header first, so a backend can map it
+/// onto uniform registers without repacking. Asserted below.
+pub const PixelWaterDraw = extern struct {
+    /// Reservoir silhouette mask; the maximum interior the water may occupy.
+    /// `0` → the effect is unrenderable and the draw degrades (the caller is
+    /// expected to have validated this at authoring time).
+    mask_texture: u32 = 0,
+    /// Supplied, pre-authored reflection texture, sampled in reservoir-local
+    /// coordinates. `0` → no reflection contribution.
+    reflection_texture: u32 = 0,
+    /// Reservoir rectangle size in native art pixels.
+    logical_width: u32 = 0,
+    logical_height: u32 = 0,
+    /// Native art pixels per effect cell — the grid all sampling and
+    /// displacement quantize to. The reference scene's 6 screen pixels per cell
+    /// is integer ENLARGEMENT of the art, not this value.
+    grid_pixels: u32 = 1,
+    /// Live entries in `ripples`, `0..=PIXEL_WATER_MAX_RIPPLES`. Entries at or
+    /// past this index are ignored, not zero-valued.
+    ripple_count: u32 = 0,
+    /// Bitset — see `PIXEL_WATER_FLAG_WAVES`.
+    flags: u32 = 0,
+    _reserved_u0: u32 = 0,
+
+    /// Water body colour (deepest).
+    deep: PixelWaterRgba = .{},
+    /// Colour at/near the surface line.
+    surface: PixelWaterRgba = .{},
+    /// Limited highlight colour. Not simulated light: a game may drive its
+    /// alpha (and `reflection_opacity`) from lamp state.
+    highlight: PixelWaterRgba = .{},
+
+    /// Fill fraction from the reservoir's BOTTOM, clamped 0..1.
+    /// `surface_y = logical_height * (1 - level)`. `0` renders no water.
+    level: f32 = 0,
+    /// Accumulated SIMULATION seconds (pause + time scale already applied).
+    /// Never a wall clock — deterministic tests pin this.
+    time: f32 = 0,
+    /// Periodic surface wave amplitude, in native art pixels. Gated by
+    /// `PIXEL_WATER_FLAG_WAVES`.
+    wave_amplitude_pixels: f32 = 0,
+    /// Wave period in seconds. Must be > 0 when waves are enabled.
+    wave_period_seconds: f32 = 1,
+
+    /// Maximum reflection-sampling displacement, in native art pixels.
+    distortion_pixels: f32 = 0,
+    /// Reflection mix, 0..1.
+    reflection_opacity: f32 = 0,
+    /// Lifetime of one impact, in seconds. Must be > 0.
+    ripple_duration_seconds: f32 = 0,
+    /// Impact falloff radius, in native art pixels. Must be > 0.
+    ripple_radius_pixels: f32 = 0,
+
+    /// Peak displacement of a full-strength impact, in native art pixels.
+    ripple_strength_pixels: f32 = 0,
+    _reserved_f0: f32 = 0,
+    _reserved_f1: f32 = 0,
+    _reserved_f2: f32 = 0,
+
+    ripples: [PIXEL_WATER_MAX_RIPPLES]PixelWaterRipple = [_]PixelWaterRipple{.{}} ** PIXEL_WATER_MAX_RIPPLES,
+};
+
+// Locked layout. These are the size/offset assertions the RFC's phase-1 exit
+// requires: the value crosses the assembler-generated marshal seam between
+// packages that may be pinned to different versions, so a silent field
+// insertion must break the build here rather than misread uniforms on a GPU.
+comptime {
+    std.debug.assert(@sizeOf(PixelWaterRipple) == 16);
+    std.debug.assert(@sizeOf(PixelWaterRgba) == 16);
+    std.debug.assert(@sizeOf(PixelWaterDraw) == 256);
+    std.debug.assert(@alignOf(PixelWaterDraw) == 4);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "mask_texture") == 0);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "deep") == 32);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "surface") == 48);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "highlight") == 64);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "level") == 80);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "distortion_pixels") == 96);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "ripple_strength_pixels") == 112);
+    std.debug.assert(@offsetOf(PixelWaterDraw, "ripples") == 128);
+    // Unchanged-by-construction: adding `pixel_water` must not move a byte of
+    // the four shipped effects' block.
+    std.debug.assert(@sizeOf(MaterialUniforms) == 32);
+    std.debug.assert(@sizeOf(Material) == 36);
 }
 
 // ── Render-target sub-surface (post-fx foundation, labelle-gfx#305) ──────────
@@ -1030,10 +1199,43 @@ pub fn Backend(comptime Impl: type) type {
         /// Runtime-callable mirror of the comptime `materialCapabilities`, for
         /// the renderer's per-effect degrade branch + warn-once table.
         pub inline fn materialSupported(effect: MaterialEffect) bool {
-            if (!@hasDecl(Impl, "drawTextureProMaterial")) return false;
             if (effect == .none) return false;
+            // Coarse gate, per effect family: `pixel_water` needs the water
+            // decl, everything else needs the material decl.
+            if (effect == .pixel_water) {
+                if (!@hasDecl(Impl, pixel_water_fn_decl)) return false;
+            } else if (!@hasDecl(Impl, "drawTextureProMaterial")) return false;
             if (@hasDecl(Impl, "materialSupported")) return Impl.materialSupported(effect);
             return true;
+        }
+
+        /// Pixel-water sprite draw (COND-07, labelle-bgfx#100). Identical to
+        /// `drawTexturePro` but carries the full resolved `PixelWaterDraw`.
+        ///
+        /// OPTIONAL and additive, mirroring `drawTextureProMaterial`: a backend
+        /// opts in by declaring `drawTextureProPixelWater`, so
+        /// `DRAW_CONTRACT_VERSION` does NOT bump and no existing backend is
+        /// rejected. Gating is the same two levels — decl presence, then the
+        /// optional `Impl.materialSupported(.pixel_water)` (which lets a backend
+        /// carry the decl while a shader is still unbuilt on this renderer).
+        ///
+        /// Unsupported ⇒ plain `drawTexturePro` of the sprite, which is the
+        /// authored STATIC reservoir fallback: it renders, it just does not
+        /// simulate. Callers report that once, not per frame.
+        pub inline fn drawTextureProPixelWater(
+            texture: Texture,
+            source: Rectangle,
+            dest: Rectangle,
+            origin: Vector2,
+            rotation: f32,
+            tint: Color,
+            water: PixelWaterDraw,
+        ) void {
+            if (@hasDecl(Impl, pixel_water_fn_decl) and materialSupported(.pixel_water)) {
+                @field(Impl, pixel_water_fn_decl)(texture, source, dest, origin, rotation, tint, water);
+            } else {
+                drawTexturePro(texture, source, dest, origin, rotation, tint);
+            }
         }
 
         // ── Render-target sub-surface (post-fx foundation, labelle-gfx#305) ──

@@ -409,6 +409,26 @@ pub fn materialCapabilities(comptime Impl: type) MaterialCapabilities {
 // water decl (see `materialCapabilities`), so every backend that predates this
 // block keeps compiling and correctly reports `pixel_water` unsupported.
 
+// SOURCE-BREAKING, and deliberately so. Appending a tag to `MaterialEffect` is
+// NOT "purely additive" in this file's usual sense: any backend with an
+// EXHAUSTIVE `switch` over the enum stops compiling against this core until it
+// adds a `.pixel_water` arm. The `@hasDecl` gate governs DISPATCH, not
+// compilation, so it cannot prevent that.
+//
+// None of the `*_CONTRACT_VERSION` numbers bump anyway, and that is a judgement
+// rather than an oversight. `DRAW_CONTRACT_VERSION` feeds the assembler's
+// generated `targets_draw_contract` build gate, which is all-or-nothing: bumping
+// it REJECTS EVERY BACKEND, including the four here that have no material switch
+// at all and are genuinely unaffected — in order to announce a break that
+// already surfaces as a precise compile error in the two that are. Trading an
+// exact, self-describing error for a blanket rejection makes the break harder to
+// act on, not easier.
+//
+// Audited at the time of writing: labelle-sokol (5 switch sites in
+// `src/gfx/material.zig`) and labelle-bgfx (3 in `src/gfx/texture.zig` plus
+// `programForEffect`) need arms; labelle-gfx only in a test; raylib / sdl / wgpu
+// / null have no material switch and are untouched.
+
 /// The decl a backend adds to opt into the pixel-water sub-surface. Named so
 /// `materialCapabilities` and `Backend(Impl).materialSupported` agree on one
 /// spelling.
@@ -1179,7 +1199,17 @@ pub fn Backend(comptime Impl: type) type {
             tint: Color,
             material: Material,
         ) void {
-            if (@hasDecl(Impl, "drawTextureProMaterial") and material.effect != .none) {
+            // `.pixel_water` NEVER travels this path, whatever the backend
+            // declares. Its payload does not fit `MaterialUniforms`, so
+            // forwarding it here would hand a pre-water backend tag 5 with an
+            // unrelated 32-byte uniform block — and the fine-grained probe below
+            // cannot catch it, because a backend that omits `materialSupported`
+            // is taken to support every built-in. Gate it OUT of the family it
+            // does not belong to, at the coarse level, rather than relying on an
+            // optional decl to say no.
+            if (@hasDecl(Impl, "drawTextureProMaterial") and
+                material.effect != .none and material.effect != .pixel_water)
+            {
                 // Fine-grained: the backend may implement the decl but not THIS effect.
                 if (@hasDecl(Impl, "materialSupported")) {
                     if (!Impl.materialSupported(material.effect)) {
@@ -1212,10 +1242,11 @@ pub fn Backend(comptime Impl: type) type {
         /// Pixel-water sprite draw (COND-07, labelle-bgfx#100). Identical to
         /// `drawTexturePro` but carries the full resolved `PixelWaterDraw`.
         ///
-        /// OPTIONAL and additive, mirroring `drawTextureProMaterial`: a backend
-        /// opts in by declaring `drawTextureProPixelWater`, so
-        /// `DRAW_CONTRACT_VERSION` does NOT bump and no existing backend is
-        /// rejected. Gating is the same two levels — decl presence, then the
+        /// OPTIONAL, mirroring `drawTextureProMaterial`: a backend opts in by
+        /// declaring `drawTextureProPixelWater`. The DECL is additive; the
+        /// `MaterialEffect.pixel_water` tag that names it is NOT — see the
+        /// sub-surface header on why this still does not bump
+        /// `DRAW_CONTRACT_VERSION`. Gating is the same two levels — decl presence, then the
         /// optional `Impl.materialSupported(.pixel_water)` (which lets a backend
         /// carry the decl while a shader is still unbuilt on this renderer).
         ///

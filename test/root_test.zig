@@ -2526,6 +2526,112 @@ test "pixel_water: NOT implied by drawTextureProMaterial — it needs its own de
     try testing.expectEqual(@as(usize, 0), comptime root.materialCapabilities(Neither).effects.len);
 }
 
+test "pixel_water: never rides the GENERIC material draw, whatever the backend declares" {
+    // The hole this pins: a backend that declares `drawTextureProMaterial` but
+    // omits the optional `materialSupported` probe is taken to support every
+    // built-in. Without a coarse gate, `Material{ .effect = .pixel_water }`
+    // would be forwarded to the generic material path — handing a pre-water
+    // backend tag 5 with an unrelated 32-byte uniform block. The fine-grained
+    // probe CANNOT catch it, precisely because this backend has none.
+    const MaterialNoProbe = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1 };
+        const C = @This().Color;
+
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+        var plain: usize = 0;
+        var material_effects: [8]root.MaterialEffect = undefined;
+        var material_draws: usize = 0;
+
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {
+            plain += 1;
+        }
+        // Declares the material decl, but NO `materialSupported` probe.
+        pub fn drawTextureProMaterial(
+            _: Texture,
+            _: Rectangle,
+            _: Rectangle,
+            _: Vector2,
+            _: f32,
+            _: C,
+            material: root.Material,
+        ) void {
+            if (material_draws < material_effects.len) material_effects[material_draws] = material.effect;
+            material_draws += 1;
+        }
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 1, .height = 1 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{ .id = 2 };
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+    };
+
+    const B = Backend(MaterialNoProbe);
+    const tex = try B.loadTexture("x.png");
+    const rect = MaterialNoProbe.Rectangle{ .x = 0, .y = 0, .width = 8, .height = 8 };
+    const origin = MaterialNoProbe.Vector2{ .x = 0, .y = 0 };
+
+    // It does NOT declare the water decl, so it must not advertise water…
+    try testing.expect(!@hasDecl(MaterialNoProbe, root.pixel_water_fn_decl));
+    try testing.expect(!B.materialSupported(.pixel_water));
+    // …while still advertising the four it really does implement.
+    try testing.expect(B.materialSupported(.flash));
+    try testing.expectEqual(@as(usize, 4), comptime root.materialCapabilities(MaterialNoProbe).effects.len);
+
+    // A real effect still reaches the generic path.
+    B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{ .effect = .flash });
+    try testing.expectEqual(@as(usize, 1), MaterialNoProbe.material_draws);
+    try testing.expectEqual(root.MaterialEffect.flash, MaterialNoProbe.material_effects[0]);
+
+    // Water does NOT. Assert the MECHANISM: not merely that the plain counter
+    // moved, but that tag 5 never entered the material decl at all.
+    B.drawTextureProMaterial(tex, rect, rect, origin, 0, B.white, .{ .effect = .pixel_water });
+    try testing.expectEqual(@as(usize, 1), MaterialNoProbe.material_draws); // unchanged
+    try testing.expectEqual(@as(usize, 1), MaterialNoProbe.plain); // degraded instead
+
+    // …and the dedicated API degrades too, since there is no water decl.
+    B.drawTextureProPixelWater(tex, rect, rect, origin, 0, B.white, .{});
+    try testing.expectEqual(@as(usize, 1), MaterialNoProbe.material_draws);
+    try testing.expectEqual(@as(usize, 2), MaterialNoProbe.plain);
+}
+
 test "pixel_water: the mock records the whole resolved payload, not a plain draw" {
     MockBackend.initMock(testing.allocator);
     defer MockBackend.deinitMock();

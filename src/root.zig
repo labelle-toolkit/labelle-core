@@ -119,6 +119,15 @@ pub const MaterialUniforms = backend_contract.MaterialUniforms;
 pub const Material = backend_contract.Material;
 pub const MaterialCapabilities = backend_contract.MaterialCapabilities;
 pub const materialCapabilities = backend_contract.materialCapabilities;
+// Pixel-water sub-surface (COND-07, labelle-bgfx#100). Value types only; the
+// optional `drawTextureProPixelWater` decl lives on `Backend(Impl)`. Capability
+// identity is `MaterialEffect.pixel_water`.
+pub const PixelWaterDraw = backend_contract.PixelWaterDraw;
+pub const PixelWaterRipple = backend_contract.PixelWaterRipple;
+pub const PixelWaterRgba = backend_contract.PixelWaterRgba;
+pub const PIXEL_WATER_MAX_RIPPLES = backend_contract.PIXEL_WATER_MAX_RIPPLES;
+pub const PIXEL_WATER_FLAG_WAVES = backend_contract.PIXEL_WATER_FLAG_WAVES;
+pub const pixel_water_fn_decl = backend_contract.pixel_water_fn_decl;
 // Render-target sub-surface + full-screen post-fx pass stack (labelle-gfx#305,
 // RFC §2). Value types + capability introspection; the optional
 // `createRenderTarget`/…/`applyPostPass`/`postPassSupported` decls live on

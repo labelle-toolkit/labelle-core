@@ -355,6 +355,34 @@ pub fn runRenderSuite(comptime Impl: type) !void {
             });
         }
 
+        // Optional pixel-water sprite draw (COND-07, labelle-bgfx#100,
+        // capability-gated). Same totality guarantee as the material wrapper:
+        // a backend without the water decl degrades to a plain `drawTexturePro`
+        // (the authored STATIC reservoir), so this is safe to call everywhere.
+        // Shape-only — the visual result is the backend's own golden's job.
+        {
+            var water = backend_contract.PixelWaterDraw{
+                .logical_width = 96,
+                .logical_height = 18,
+                .grid_pixels = 1,
+                .flags = backend_contract.PIXEL_WATER_FLAG_WAVES,
+                .level = 0.35,
+                .time = 1.0,
+                .wave_amplitude_pixels = 1,
+                .wave_period_seconds = 3,
+                .ripple_duration_seconds = 0.8,
+                .ripple_radius_pixels = 6,
+                .ripple_strength_pixels = 1,
+                .ripple_count = 1,
+            };
+            water.ripples[0] = .{ .x = 12, .start_time = 0.5, .strength = 1 };
+            B.drawTextureProPixelWater(tex, rect, rect, v, 0, B.white, water);
+            // An empty reservoir with no ripples is the degenerate input every
+            // backend must survive (it renders nothing, it does not divide by
+            // zero on `wave_period_seconds`).
+            B.drawTextureProPixelWater(tex, rect, rect, v, 0, B.white, .{});
+        }
+
         // Optional render-target sub-surface + post-fx pass primitive
         // (labelle-gfx#305, capability-gated). A backend advertising the WHOLE
         // render-target sub-surface must round-trip a create→begin→end→draw→

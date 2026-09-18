@@ -352,7 +352,13 @@ pub const MaterialUniforms = extern struct {
 pub const Material = extern struct {
     effect: MaterialEffect = .none,
     uniforms: MaterialUniforms = .{},
+    /// Game-owned shader instance. Takes precedence over a curated effect.
+    shader: @import("shader_material.zig").Id = .none,
 };
+
+/// Material payload layout version. v2 adds a generation-bearing shader handle;
+/// consumers passing Material by value must rebuild together with this core.
+pub const MATERIAL_CONTRACT_VERSION: u32 = 2;
 
 /// The curated material effects a backend `Impl` advertises (see
 /// `materialCapabilities`). Consumed by (a) the provider manifest
@@ -562,7 +568,7 @@ comptime {
     // Unchanged-by-construction: adding `pixel_water` must not move a byte of
     // the four shipped effects' block.
     std.debug.assert(@sizeOf(MaterialUniforms) == 32);
-    std.debug.assert(@sizeOf(Material) == 36);
+    std.debug.assert(@sizeOf(Material) == 48);
 }
 
 // ── Render-target sub-surface (post-fx foundation, labelle-gfx#305) ──────────
@@ -1199,6 +1205,20 @@ pub fn Backend(comptime Impl: type) type {
             tint: Color,
             material: Material,
         ) void {
+            if (material.shader != .none) {
+                if (comptime @hasDecl(Impl, "createShaderMaterial") and @hasDecl(Impl, "setShaderParameter") and
+                    @hasDecl(Impl, "setShaderTexture") and @hasDecl(Impl, "destroyShaderMaterial") and @hasDecl(Impl, "drawTextureProMaterial"))
+                {
+                    if (shaderMaterialSupported()) {
+                        Impl.drawTextureProMaterial(texture, source, dest, origin, rotation, tint, material);
+                    } else {
+                        drawTexturePro(texture, source, dest, origin, rotation, tint);
+                    }
+                } else {
+                    drawTexturePro(texture, source, dest, origin, rotation, tint);
+                }
+                return;
+            }
             // `.pixel_water` NEVER travels this path, whatever the backend
             // declares. Its payload does not fit `MaterialUniforms`, so
             // forwarding it here would hand a pre-water backend tag 5 with an
@@ -1237,6 +1257,37 @@ pub fn Backend(comptime Impl: type) type {
             } else if (!@hasDecl(Impl, "drawTextureProMaterial")) return false;
             if (@hasDecl(Impl, "materialSupported")) return Impl.materialSupported(effect);
             return true;
+        }
+
+        pub fn shaderMaterialSupported() bool {
+            if (comptime !@hasDecl(Impl, "createShaderMaterial") or !@hasDecl(Impl, "setShaderParameter") or
+                !@hasDecl(Impl, "setShaderTexture") or !@hasDecl(Impl, "destroyShaderMaterial") or
+                !@hasDecl(Impl, "drawTextureProMaterial")) return false;
+            if (comptime @hasDecl(Impl, "shaderMaterialSupported")) return Impl.shaderMaterialSupported();
+            return true;
+        }
+
+        pub fn createShaderMaterial(descriptor: @import("shader_material.zig").Descriptor) !@import("shader_material.zig").Id {
+            try @import("shader_material.zig").validateDescriptor(descriptor);
+            if (comptime @hasDecl(Impl, "createShaderMaterial")) {
+                if (!shaderMaterialSupported()) return error.Unsupported;
+                return Impl.createShaderMaterial(descriptor);
+            }
+            return error.Unsupported;
+        }
+
+        pub fn setShaderParameter(id: @import("shader_material.zig").Id, name: []const u8, values: []const f32) !void {
+            if (comptime @hasDecl(Impl, "setShaderParameter")) return Impl.setShaderParameter(id, name, values);
+            return error.Unsupported;
+        }
+
+        pub fn setShaderTexture(id: @import("shader_material.zig").Id, name: []const u8, texture: BackendTextureId) !void {
+            if (comptime @hasDecl(Impl, "setShaderTexture")) return Impl.setShaderTexture(id, name, texture);
+            return error.Unsupported;
+        }
+
+        pub fn destroyShaderMaterial(id: @import("shader_material.zig").Id) void {
+            if (comptime @hasDecl(Impl, "destroyShaderMaterial")) Impl.destroyShaderMaterial(id);
         }
 
         /// Pixel-water sprite draw (COND-07, labelle-bgfx#100). Identical to

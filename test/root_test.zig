@@ -2394,6 +2394,23 @@ test "Backend: drawTextureProMaterial degrades an unsupported effect to a plain 
     try testing.expectEqual(@as(usize, 1), MockBackend.getDrawCallCount());
 }
 
+test "Backend: unsupported game shaders return errors and draw the plain sprite" {
+    MockBackend.initMock(testing.allocator);
+    defer MockBackend.deinitMock();
+    const B = Backend(MockBackend);
+    const shader = root.shader_material;
+    try testing.expect(!B.shaderMaterialSupported());
+    try testing.expectError(error.Unsupported, B.createShaderMaterial(.{ .shaders = .{ .spv = "compiled" } }));
+    try testing.expectError(error.Unsupported, B.setShaderParameter(@enumFromInt(1), "u_value", &.{0}));
+    try testing.expectError(error.Unsupported, B.setShaderTexture(@enumFromInt(1), "s_mask", .none));
+    B.destroyShaderMaterial(@enumFromInt(1));
+    const tex = try B.loadTexture("atlas.png");
+    const rect = MockBackend.Rectangle{ .x = 0, .y = 0, .width = 8, .height = 8 };
+    B.drawTextureProMaterial(tex, rect, rect, .{ .x = 0, .y = 0 }, 0, B.white, .{ .shader = @as(shader.Id, @enumFromInt(1)) });
+    try testing.expectEqual(@as(usize, 0), MockBackend.getMaterialCallCount());
+    try testing.expectEqual(@as(usize, 1), MockBackend.getDrawCallCount());
+}
+
 test "Backend: a `.none` material always takes the plain draw path" {
     MockBackend.initMock(testing.allocator);
     defer MockBackend.deinitMock();

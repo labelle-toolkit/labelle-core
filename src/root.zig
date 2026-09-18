@@ -10,6 +10,7 @@ pub const render = @import("render.zig");
 // The render backend contract — the 8th comptime contract, relocated from
 // labelle-gfx (labelle-assembler#387). gfx + engine now alias these types.
 pub const backend_contract = @import("backend_contract.zig");
+pub const shader_material = @import("shader_material.zig");
 pub const window_contract = @import("window_contract.zig");
 pub const mock_backend = @import("mock_backend.zig");
 // Behavioral conformance suites (labelle-assembler#453). Parameterized over a
@@ -283,6 +284,7 @@ pub fn EntityInfo(comptime Entity: type) type {
 //
 // Add a line here when a `src/*.zig` gains its first inline test.
 test {
+    _ = @import("shader_material.zig");
     _ = @import("android_backend.zig");
     _ = @import("gamepad.zig");
     _ = @import("save_policy.zig");

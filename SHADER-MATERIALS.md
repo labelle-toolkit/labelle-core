@@ -30,4 +30,4 @@ The existing `drawTextureProMaterial` call carries `Material.shader`. A live gam
 
 `backend_contract.MATERIAL_CONTRACT_VERSION` is **2**. `Material` grows from 36 to 48 bytes, with an eight-byte aligned shader handle at offset 40. This is an ABI change: all producers, adapters and renderers exchanging the payload must use the same core type and rebuild together. Required primitive draw signatures and their version remain unchanged; consumers with a separate material marshalling ABI must check this material version explicitly.
 
-Existing curated materials and the old water contract remain available while game-side migration is verified. Removing the latter is a separately reviewed breaking cleanup, not implied by the presence of this API.
+The four existing curated materials remain available. The specialized water contract has been removed: use a game-owned `WaterShader` component and generic material instead of `PixelWaterDraw`, the water effect tag, or `drawTextureProPixelWater`. Older released binaries/packages are unchanged. Source consumers of the removed API must migrate together with the new engine/gfx/backend versions.

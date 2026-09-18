@@ -1081,13 +1081,28 @@ pub fn Backend(comptime Impl: type) type {
             return error.Unsupported;
         }
 
+        /// Update a live material's parameter. Gated on the WHOLE optional
+        /// surface exactly as `createShaderMaterial` is — not on this one decl.
+        /// A backend that declares the setter but omits another required
+        /// method, or whose runtime `shaderMaterialSupported()` says no, could
+        /// never have issued a valid `Id`, so an update reaching it would be an
+        /// update for a handle it cannot own. Refuse it here rather than let
+        /// the seam be "all-or-nothing" for create and "any-of" for update.
         pub fn setShaderParameter(id: @import("shader_material.zig").Id, name: []const u8, values: []const f32) !void {
-            if (comptime @hasDecl(Impl, "setShaderParameter")) return Impl.setShaderParameter(id, name, values);
+            if (comptime @hasDecl(Impl, "setShaderParameter")) {
+                if (!shaderMaterialSupported()) return error.Unsupported;
+                return Impl.setShaderParameter(id, name, values);
+            }
             return error.Unsupported;
         }
 
+        /// Bind a texture on a live material. Same whole-surface gate as the
+        /// parameter setter; see there.
         pub fn setShaderTexture(id: @import("shader_material.zig").Id, name: []const u8, texture: BackendTextureId) !void {
-            if (comptime @hasDecl(Impl, "setShaderTexture")) return Impl.setShaderTexture(id, name, texture);
+            if (comptime @hasDecl(Impl, "setShaderTexture")) {
+                if (!shaderMaterialSupported()) return error.Unsupported;
+                return Impl.setShaderTexture(id, name, texture);
+            }
             return error.Unsupported;
         }
 

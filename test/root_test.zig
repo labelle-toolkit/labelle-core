@@ -2411,6 +2411,150 @@ test "Backend: unsupported game shaders return errors and draw the plain sprite"
     try testing.expectEqual(@as(usize, 1), MockBackend.getDrawCallCount());
 }
 
+test "Backend: shader setters are gated on the WHOLE surface, not their own decl" {
+    // The existing unsupported-shader test uses `MockBackend`, which declares
+    // NONE of the shader methods — so its setters return `Unsupported` via the
+    // `@hasDecl` fall-through and never exercise the gate at all. The hole is
+    // a backend that DOES declare a setter but (a) omits another required
+    // method, or (b) reports `shaderMaterialSupported() == false` at runtime.
+    // `createShaderMaterial` refuses both; the setters used to forward anyway,
+    // handing the backend updates for handles it could never have issued.
+    //
+    // MECHANISM, not value: each fixture counts how often its setter body
+    // RAN. `Unsupported` alone would be satisfied by the wrong path; the
+    // counter is what proves the backend was never entered.
+    const shader = root.shader_material;
+
+    // (b): complete seam, runtime-disabled.
+    const Disabled = struct {
+        pub const Texture = struct { id: u32 };
+        pub const Color = struct { r: u8, g: u8, b: u8, a: u8 };
+        pub const Rectangle = struct { x: f32, y: f32, width: f32, height: f32 };
+        pub const Vector2 = struct { x: f32, y: f32 };
+        pub const Camera2D = struct { zoom: f32 = 1 };
+        const C = @This().Color;
+        pub const white = C{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        pub const black = C{ .r = 0, .g = 0, .b = 0, .a = 255 };
+        pub const red = C{ .r = 255, .g = 0, .b = 0, .a = 255 };
+        pub const green = C{ .r = 0, .g = 255, .b = 0, .a = 255 };
+        pub const blue = C{ .r = 0, .g = 0, .b = 255, .a = 255 };
+        pub const transparent = C{ .r = 0, .g = 0, .b = 0, .a = 0 };
+        var param_calls: usize = 0;
+        var texture_calls: usize = 0;
+        pub fn shaderMaterialSupported() bool {
+            return false;
+        }
+        pub fn createShaderMaterial(_: shader.Descriptor) !shader.Id {
+            return @enumFromInt(1);
+        }
+        pub fn setShaderParameter(_: shader.Id, _: []const u8, _: []const f32) !void {
+            param_calls += 1;
+        }
+        pub fn setShaderTexture(_: shader.Id, _: []const u8, _: root.BackendTextureId) !void {
+            texture_calls += 1;
+        }
+        pub fn destroyShaderMaterial(_: shader.Id) void {}
+        pub fn drawTextureProMaterial(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C, _: root.Material) void {}
+        pub fn drawTexturePro(_: Texture, _: Rectangle, _: Rectangle, _: Vector2, _: f32, _: C) void {}
+        pub fn drawRectangleRec(_: Rectangle, _: C) void {}
+        pub fn drawCircle(_: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawTriangle(_: Vector2, _: Vector2, _: Vector2, _: C) void {}
+        pub fn drawPolygon(_: []const Vector2, _: C) void {}
+        pub fn drawLine(_: f32, _: f32, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn drawText(_: [:0]const u8, _: f32, _: f32, _: f32, _: C) void {}
+        pub fn loadTexture(_: [:0]const u8) !Texture {
+            return .{ .id = 1 };
+        }
+        pub fn decodeImage(_: [:0]const u8, _: []const u8, allocator: std.mem.Allocator) !root.DecodedImage {
+            const pixels = try allocator.alloc(u8, 4);
+            @memset(pixels, 0);
+            return .{ .pixels = pixels, .width = 1, .height = 1 };
+        }
+        pub fn uploadTexture(_: root.DecodedImage) !Texture {
+            return .{ .id = 2 };
+        }
+        pub fn unloadTexture(_: Texture) void {}
+        pub fn beginMode2D(_: Camera2D) void {}
+        pub fn endMode2D() void {}
+        pub fn getScreenWidth() i32 {
+            return 640;
+        }
+        pub fn getScreenHeight() i32 {
+            return 480;
+        }
+        pub fn screenToWorld(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn worldToScreen(pos: Vector2, _: Camera2D) Vector2 {
+            return pos;
+        }
+        pub fn setDesignSize(_: i32, _: i32) void {}
+    };
+    {
+        const B = Backend(Disabled);
+        try testing.expect(!B.shaderMaterialSupported());
+        try testing.expectError(error.Unsupported, B.createShaderMaterial(.{ .shaders = .{ .spv = "compiled" } }));
+        try testing.expectError(error.Unsupported, B.setShaderParameter(@enumFromInt(1), "u_value", &.{0}));
+        try testing.expectError(error.Unsupported, B.setShaderTexture(@enumFromInt(1), "s_mask", .none));
+        // The backend's setter bodies never ran — the gate held BEFORE forwarding.
+        try testing.expectEqual(@as(usize, 0), Disabled.param_calls);
+        try testing.expectEqual(@as(usize, 0), Disabled.texture_calls);
+    }
+
+    // (a): declares the two setters but NOT create/destroy — an incomplete
+    // seam. `shaderMaterialSupported()` is false by the whole-surface rule
+    // even though no runtime probe exists, so the setters must refuse.
+    const Incomplete = struct {
+        pub const Texture = Disabled.Texture;
+        pub const Color = Disabled.Color;
+        pub const Rectangle = Disabled.Rectangle;
+        pub const Vector2 = Disabled.Vector2;
+        pub const Camera2D = Disabled.Camera2D;
+        pub const white = Disabled.white;
+        pub const black = Disabled.black;
+        pub const red = Disabled.red;
+        pub const green = Disabled.green;
+        pub const blue = Disabled.blue;
+        pub const transparent = Disabled.transparent;
+        var param_calls: usize = 0;
+        var texture_calls: usize = 0;
+        pub fn setShaderParameter(_: shader.Id, _: []const u8, _: []const f32) !void {
+            param_calls += 1;
+        }
+        pub fn setShaderTexture(_: shader.Id, _: []const u8, _: root.BackendTextureId) !void {
+            texture_calls += 1;
+        }
+        pub const drawTextureProMaterial = Disabled.drawTextureProMaterial;
+        pub const drawTexturePro = Disabled.drawTexturePro;
+        pub const drawRectangleRec = Disabled.drawRectangleRec;
+        pub const drawCircle = Disabled.drawCircle;
+        pub const drawTriangle = Disabled.drawTriangle;
+        pub const drawPolygon = Disabled.drawPolygon;
+        pub const drawLine = Disabled.drawLine;
+        pub const drawText = Disabled.drawText;
+        pub const loadTexture = Disabled.loadTexture;
+        pub const decodeImage = Disabled.decodeImage;
+        pub const uploadTexture = Disabled.uploadTexture;
+        pub const unloadTexture = Disabled.unloadTexture;
+        pub const beginMode2D = Disabled.beginMode2D;
+        pub const endMode2D = Disabled.endMode2D;
+        pub const getScreenWidth = Disabled.getScreenWidth;
+        pub const getScreenHeight = Disabled.getScreenHeight;
+        pub const screenToWorld = Disabled.screenToWorld;
+        pub const worldToScreen = Disabled.worldToScreen;
+        pub const setDesignSize = Disabled.setDesignSize;
+    };
+    {
+        const B = Backend(Incomplete);
+        try testing.expect(!@hasDecl(Incomplete, "createShaderMaterial"));
+        try testing.expect(!B.shaderMaterialSupported());
+        try testing.expectError(error.Unsupported, B.setShaderParameter(@enumFromInt(1), "u_value", &.{0}));
+        try testing.expectError(error.Unsupported, B.setShaderTexture(@enumFromInt(1), "s_mask", .none));
+        try testing.expectEqual(@as(usize, 0), Incomplete.param_calls);
+        try testing.expectEqual(@as(usize, 0), Incomplete.texture_calls);
+    }
+}
+
 test "Backend: a `.none` material always takes the plain draw path" {
     MockBackend.initMock(testing.allocator);
     defer MockBackend.deinitMock();

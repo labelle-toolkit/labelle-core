@@ -10,6 +10,7 @@ pub const render = @import("render.zig");
 // The render backend contract — the 8th comptime contract, relocated from
 // labelle-gfx (labelle-assembler#387). gfx + engine now alias these types.
 pub const backend_contract = @import("backend_contract.zig");
+pub const shader_material = @import("shader_material.zig");
 pub const window_contract = @import("window_contract.zig");
 pub const mock_backend = @import("mock_backend.zig");
 // Behavioral conformance suites (labelle-assembler#453). Parameterized over a
@@ -119,15 +120,6 @@ pub const MaterialUniforms = backend_contract.MaterialUniforms;
 pub const Material = backend_contract.Material;
 pub const MaterialCapabilities = backend_contract.MaterialCapabilities;
 pub const materialCapabilities = backend_contract.materialCapabilities;
-// Pixel-water sub-surface (COND-07, labelle-bgfx#100). Value types only; the
-// optional `drawTextureProPixelWater` decl lives on `Backend(Impl)`. Capability
-// identity is `MaterialEffect.pixel_water`.
-pub const PixelWaterDraw = backend_contract.PixelWaterDraw;
-pub const PixelWaterRipple = backend_contract.PixelWaterRipple;
-pub const PixelWaterRgba = backend_contract.PixelWaterRgba;
-pub const PIXEL_WATER_MAX_RIPPLES = backend_contract.PIXEL_WATER_MAX_RIPPLES;
-pub const PIXEL_WATER_FLAG_WAVES = backend_contract.PIXEL_WATER_FLAG_WAVES;
-pub const pixel_water_fn_decl = backend_contract.pixel_water_fn_decl;
 // Render-target sub-surface + full-screen post-fx pass stack (labelle-gfx#305,
 // RFC §2). Value types + capability introspection; the optional
 // `createRenderTarget`/…/`applyPostPass`/`postPassSupported` decls live on
@@ -283,6 +275,7 @@ pub fn EntityInfo(comptime Entity: type) type {
 //
 // Add a line here when a `src/*.zig` gains its first inline test.
 test {
+    _ = @import("shader_material.zig");
     _ = @import("android_backend.zig");
     _ = @import("gamepad.zig");
     _ = @import("save_policy.zig");

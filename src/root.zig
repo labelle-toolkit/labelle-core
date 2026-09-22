@@ -267,11 +267,10 @@ pub fn EntityInfo(comptime Entity: type) type {
 // ("cannot load comptime-only type", "unable to resolve comptime value"), and
 // `refAllDeclsRecursive` no longer exists in Zig 0.16.
 //
-// `serde.zig` is deliberately ABSENT: analysing it surfaces pre-existing
-// compile errors ("unable to resolve comptime value", "missing struct field:
-// items") in code that has never been type-checked, because nothing ever
-// analysed the file. Its 16 inline tests stay uncollected until those are
-// fixed — tracked separately rather than bundled into this wiring change.
+// `serde.zig` was absent from this list until #70: analysing it surfaced
+// compile errors in code nothing had ever type-checked (a runtime field
+// name handed to a comptime parameter, and 0.16 ArrayList/writer drift in
+// its tests). Fixed there; its 16 tests run from here now.
 //
 // Add a line here when a `src/*.zig` gains its first inline test.
 test {
@@ -281,4 +280,5 @@ test {
     _ = @import("save_policy.zig");
     _ = @import("typed_log.zig");
     _ = @import("video.zig");
+    _ = @import("serde.zig");
 }

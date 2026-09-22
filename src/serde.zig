@@ -234,7 +234,14 @@ pub const remapEntityRefsAuto = remapEntityRefs;
 
 /// Auto-detect skipField based on save declarations (new or legacy style).
 pub fn autoSkipField(comptime T: type, field_name: []const u8) bool {
-    return sp.shouldSkipField(T, field_name);
+    // `field_name` is runtime here — that is the `skipField` contract every
+    // caller in this file uses (`fn (type, []const u8) bool`) — while
+    // `sp.shouldSkipField` wants it comptime. Compare against the comptime
+    // skip list at runtime instead; same answer, and it type-checks (#70).
+    inline for (comptime sp.getSkipFields(T)) |name| {
+        if (std.mem.eql(u8, name, field_name)) return true;
+    }
+    return false;
 }
 
 // ── Entity Ref Array Serialization ──────────────────────────────────────────
@@ -371,11 +378,11 @@ const TestStruct = struct {
 test "roundtrip: struct serialization" {
     const value = TestStruct{ .x = 1.5, .y = -3.0, .name = .beta, .active = true, .count = 42, .opt = 100 };
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    try writeComponent(TestStruct, &value, buf.writer(testing.allocator), noSkip);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try writeComponent(TestStruct, &value, &buf.writer, noSkip);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
 
     const restored = try readComponent(TestStruct, parsed.value, noSkip);
@@ -390,11 +397,11 @@ test "roundtrip: struct serialization" {
 test "roundtrip: null optional" {
     const value = TestStruct{ .opt = null };
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    try writeComponent(TestStruct, &value, buf.writer(testing.allocator), noSkip);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try writeComponent(TestStruct, &value, &buf.writer, noSkip);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
 
     const restored = try readComponent(TestStruct, parsed.value, noSkip);
@@ -404,11 +411,11 @@ test "roundtrip: null optional" {
 test "roundtrip: enum" {
     const value = TestEnum.gamma;
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    try writeComponent(TestEnum, &value, buf.writer(testing.allocator), noSkip);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try writeComponent(TestEnum, &value, &buf.writer, noSkip);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
 
     const restored = try readComponent(TestEnum, parsed.value, noSkip);
@@ -421,11 +428,11 @@ test "roundtrip: EnumSet" {
     value.insert(.alpha);
     value.insert(.gamma);
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    try writeComponent(Set, &value, buf.writer(testing.allocator), noSkip);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try writeComponent(Set, &value, &buf.writer, noSkip);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
 
     const restored = try readComponent(Set, parsed.value, noSkip);
@@ -446,11 +453,11 @@ fn skipB(_: type, name: []const u8) bool {
 test "skipField: skipped fields get defaults" {
     const value = SkipStruct{ .a = 5, .b = 10 };
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    try writeComponent(SkipStruct, &value, buf.writer(testing.allocator), skipB);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try writeComponent(SkipStruct, &value, &buf.writer, skipB);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
 
     const restored = try readComponent(SkipStruct, parsed.value, skipB);
@@ -638,11 +645,11 @@ test "roundtrip: Saveable component with autoSkipField" {
 
     const value = Workstation{ .name = 42, .owner = 10, .cached = 777 };
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(testing.allocator);
-    try writeComponent(Workstation, &value, buf.writer(testing.allocator), autoSkipField);
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try writeComponent(Workstation, &value, &buf.writer, autoSkipField);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
 
     var restored = try readComponent(Workstation, parsed.value, autoSkipField);

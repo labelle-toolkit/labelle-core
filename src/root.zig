@@ -281,4 +281,5 @@ test {
     _ = @import("save_policy.zig");
     _ = @import("typed_log.zig");
     _ = @import("video.zig");
+    _ = @import("serde.zig");
 }

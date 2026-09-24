@@ -13,7 +13,15 @@ pub const MAX_NAME = 63;
 pub const Id = enum(u64) { none = 0, _ };
 pub const Kind = enum { scalar, vec2, vec3, vec4, mat4 };
 pub const Sampler = enum { point, linear };
-pub const Blend = enum { alpha, additive };
+/// How a material's output combines with what is already drawn.
+/// - `alpha`: straight alpha over (the default).
+/// - `additive`: src * a added to dst (glows).
+/// - `modulate2x`: dst * 2 * src, per RGB channel; destination alpha is
+///   kept. 0.5 leaves the pixel unchanged, 0 blacks it out and 1 doubles it,
+///   so one overlay quad can both darken and brighten what is under it
+///   (baked room lighting over batched sprites). The shader's alpha is
+///   ignored: output 0.5 wherever the overlay must not change anything.
+pub const Blend = enum { alpha, additive, modulate2x };
 pub const ShaderVariants = struct {
     glsl: []const u8 = &.{},
     essl: []const u8 = &.{},

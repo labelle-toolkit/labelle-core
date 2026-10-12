@@ -77,6 +77,33 @@ pub fn assertWindow(comptime Impl: type) void {
     }
 }
 
+/// Optional, synchronous window operations for a game-drawn mouse pointer.
+/// The generated host binds these callbacks after creating its window; they
+/// must be called on that window's thread. Missing operations return false.
+/// Callbacks borrow no state and remain valid for the lifetime of the program.
+pub const CursorControls = struct {
+    set_visible: *const fn (bool) bool = unsupportedVisibility,
+    is_over_window: *const fn () bool = unsupportedHover,
+
+    fn unsupportedVisibility(_: bool) bool {
+        return false;
+    }
+    fn unsupportedHover() bool {
+        return false;
+    }
+
+    /// Adapt optional window declarations without requiring a backend upgrade.
+    /// false from set_visible means no pointer was hidden: callers must not
+    /// draw a replacement. The query excludes unfocused/outside/touch-only
+    /// surfaces. Hiding never locks, warps or remaps pointer coordinates.
+    pub fn fromWindow(comptime Impl: type) CursorControls {
+        return .{
+            .set_visible = if (@hasDecl(Impl, "setCursorVisible")) Impl.setCursorVisible else unsupportedVisibility,
+            .is_over_window = if (@hasDecl(Impl, "isCursorOverWindow")) Impl.isCursorOverWindow else unsupportedHover,
+        };
+    }
+};
+
 /// Comptime-validated window interface. The required core dispatches directly;
 /// the loop-model-specific and display-toggle methods are capability-gated
 /// (`@hasDecl`) with safe fallbacks, so a callback backend without `shouldQuit`
@@ -121,6 +148,17 @@ pub fn Window(comptime Impl: type) type {
         /// step with the manifest's `loop_style`.
         pub inline fn ownsLoop() bool {
             return @hasDecl(Impl, "shouldQuit");
+        }
+
+        /// Show/restore the system pointer, or hide it for a game overlay.
+        /// Returns false if unavailable; never changes coordinate mapping.
+        pub inline fn setCursorVisible(visible: bool) bool {
+            return CursorControls.fromWindow(Impl).set_visible(visible);
+        }
+
+        /// A mouse/pen is over the focused game surface. False if unsupported.
+        pub inline fn isCursorOverWindow() bool {
+            return CursorControls.fromWindow(Impl).is_over_window();
         }
 
         // ── Display toggles (optional — engine-owned flag, backend applies) ─
@@ -193,3 +231,44 @@ pub const StubWindow = struct {
     }
     pub fn requestQuit() void {}
 };
+
+test "cursor controls safely default for old or partial backends" {
+    const testing = @import("std").testing;
+    try testing.expect(!Window(StubWindow).setCursorVisible(false));
+    try testing.expect(!Window(StubWindow).isCursorOverWindow());
+    const Partial = struct {
+        pub fn isCursorOverWindow() bool {
+            return true;
+        }
+    };
+    const partial = CursorControls.fromWindow(Partial);
+    try testing.expect(partial.is_over_window());
+    try testing.expect(!partial.set_visible(false));
+}
+
+test "cursor controls forward the requested value and backend result" {
+    const testing = @import("std").testing;
+    const Fake = struct {
+        var visible: bool = true;
+        var available: bool = true;
+        pub fn setCursorVisible(value: bool) bool {
+            if (!available) return false;
+            visible = value;
+            return true;
+        }
+        pub fn isCursorOverWindow() bool {
+            return available;
+        }
+    };
+    Fake.visible = true;
+    Fake.available = true;
+    const controls = CursorControls.fromWindow(Fake);
+    try testing.expect(controls.set_visible(false));
+    try testing.expect(!Fake.visible);
+    try testing.expect(controls.set_visible(true));
+    try testing.expect(Fake.visible);
+    Fake.available = false;
+    try testing.expect(!controls.set_visible(false));
+    try testing.expect(!controls.is_over_window());
+    try testing.expect(Fake.visible);
+}

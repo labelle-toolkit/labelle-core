@@ -66,6 +66,7 @@ pub const required_input_decls = input.required_input_decls;
 pub const INPUT_CONTRACT_VERSION = input.INPUT_CONTRACT_VERSION;
 
 pub const Window = window_contract.Window;
+pub const CursorControls = window_contract.CursorControls;
 pub const assertWindow = window_contract.assertWindow;
 pub const missingWindowDecls = window_contract.missingWindowDecls;
 pub const required_window_decls = window_contract.required_window_decls;
